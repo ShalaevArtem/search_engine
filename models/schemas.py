@@ -1,20 +1,40 @@
 from whoosh import fields
 from whoosh.analysis import StemmingAnalyzer, StandardAnalyzer
 
-# Схема индекса
+# Схема индекса Whoosh для полнотекстового поиска
 search_schema = fields.Schema(
-    path=fields.ID(stored=True, unique=True),
-    filename=fields.TEXT(stored=True, analyzer=StandardAnalyzer()),
-    content=fields.TEXT(analyzer=StemmingAnalyzer()),
-    last_modified=fields.DATETIME(stored=True)
+    # Уникальный путь к файлу (индексируется как ID)
+    path=fields.ID(
+        stored=True,    # Хранится в индексе для быстрого доступа
+        unique=True     # Гарантирует уникальность путей
+    ),
+
+    # Имя файла со стандартным анализатором (разбиение на слова + нижний регистр)
+    filename=fields.TEXT(
+        stored=True,    # Сохраняется для отображения в результатах
+        analyzer=StandardAnalyzer() # Анализатор без стемминга
+    ),
+
+    # Содержимое файла со стемминг-анализатором (нормализация словоформ)
+    content=fields.TEXT(
+        analyzer=StemmingAnalyzer() # Приводит слова к основе (работает -> работа)
+    ),
+
+    # Дата последнего изменения файла
+    last_modified=fields.DATETIME(
+        stored=True     # Хранится для фильтрации по дате
+    )
 )
 
-# Типы данных
+# Типы данных для аннотаций
 from typing import Dict, TypedDict
+
+# Результат поиска: словарь с путем, оценкой релевантности и датой изменения
 SearchResult = Dict[str, str]
 
+# Параметры для комбинированного поиска (с проверкой типов)
 class CombinedSearchParams(TypedDict):
-    query: str
-    start_date: str  # Формат: "YYYY-MM-DD"
-    end_date: str    # Формат: "YYYY-MM-DD"
-    limit: int
+    query: str      # Поисковая фраза
+    start_date: str # Начальная дата в формате "YYYY-MM-DD"
+    end_date: str   # Конечная дата в формате "ГГГГ-ММ-ДД"
+    limit: int      # Максимальное количество результатов

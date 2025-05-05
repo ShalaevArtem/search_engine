@@ -3,13 +3,18 @@ import sys
 import os
 import pathlib
 
+# --- Исправление путей к ресурсам при запуске из .exe (PyInstaller) ---
 if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+    # Для pymorphy2 словарей
     os.environ["PYMORPHY2_DICT_PATH"] = str(pathlib.Path(sys._MEIPASS).joinpath('pymorphy2_dicts_ru/data'))
 if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+    # Для ru-synonyms
     os.environ["PYCHARTS_GALLERY_API"] = str(pathlib.Path(sys._MEIPASS).joinpath('ru-synonyms'))
 
+# --- Импорт библиотек для работы с русским языком ---
 import ru_synonyms
 import pymorphy2_dicts_ru
+
 import sys
 from pathlib import Path
 from PyQt6.QtWidgets import (
@@ -19,7 +24,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QDate, QThread, pyqtSignal
 
-# Модули поиска и индексации
+# --- Импорт модулей поиска и индексации ---
 from core.indexer import FileIndexer
 from core.searcher import (
     setup_search_parser, search_index, search_time_range,
@@ -27,8 +32,9 @@ from core.searcher import (
 )
 from config import Config
 
+# --- Поток для индексации с прогресс-баром ---
 class IndexThread(QThread):
-    """Поток для индексации с прогресс-баром"""
+    """Отдельный поток для индексации файлов с поддержкой прогресса."""
     progress = pyqtSignal(int)
     finished = pyqtSignal(int, int, str)  # success, failed, message
 
@@ -45,27 +51,28 @@ class IndexThread(QThread):
         except Exception as e:
             self.finished.emit(0, 0, f"Ошибка: {str(e)}")
 
+# --- Основное окно приложения ---
 class ModernSearchApp(QMainWindow):
-    """Основной класс GUI"""
+    """Главный класс GUI поисковой системы."""
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Поисковая система")
         self.setMinimumSize(800, 500)
 
-        # Индекс и парсер
+        # --- Индекс и парсер ---
         Config.INDEX_DIR.mkdir(exist_ok=True)
         self.ix = FileIndexer.get_index(Config.INDEX_DIR)
         if self.ix.is_empty():
             print("Индекс пуст. Выполните индексацию.")
         self.parser = setup_search_parser(self.ix.schema)
 
-        # Layout
+        # --- Основной layout ---
         central_widget = QWidget()
         main_layout = QVBoxLayout(central_widget)
         main_layout.setContentsMargins(8, 6, 8, 6)
         main_layout.setSpacing(6)
 
-        # Прогресс-бар (по умолчанию скрыт)
+        # --- Прогресс-бар индексации (по умолчанию скрыт) ---
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
@@ -73,7 +80,7 @@ class ModernSearchApp(QMainWindow):
         self.progress_bar.hide()
         main_layout.addWidget(self.progress_bar)
 
-        # Вкладки
+        # --- Вкладки для разных видов поиска и индексации ---
         self.tabs = QTabWidget()
         self.tabs.addTab(self.create_index_tab(), "📁 Индексация")
         self.tabs.addTab(self.create_keywords_tab(), "🔍 Ключевые слова")
@@ -82,7 +89,7 @@ class ModernSearchApp(QMainWindow):
         self.tabs.addTab(self.create_filename_tab(), "📝 Имя файла")
         main_layout.addWidget(self.tabs)
 
-        # Таблица результатов (по умолчанию скрыта)
+        # --- Таблица для отображения результатов поиска ---
         self.results_table = QTableWidget(0, 3)
         self.results_table.setHorizontalHeaderLabels(["Имя", "Релевантность", "Дата изменения"])
         self.results_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -101,6 +108,7 @@ class ModernSearchApp(QMainWindow):
         self.index_thread = None
 
     def dark_stylesheet(self):
+        """CSS-стили для тёмной темы интерфейса."""
         return """
         QMainWindow, QWidget {
             background-color: #18191c;
@@ -177,7 +185,7 @@ class ModernSearchApp(QMainWindow):
         }
         """
 
-    # --- Вкладки ---
+    # --- Вкладка "Индексация" ---
     def create_index_tab(self):
         tab = QWidget()
         layout = QHBoxLayout(tab)
@@ -193,6 +201,7 @@ class ModernSearchApp(QMainWindow):
         layout.addWidget(index_btn)
         return tab
 
+    # --- Вкладка "Ключевые слова" ---
     def create_keywords_tab(self):
         tab = QWidget()
         layout = QHBoxLayout(tab)
@@ -206,6 +215,7 @@ class ModernSearchApp(QMainWindow):
         layout.addWidget(search_btn)
         return tab
 
+    # --- Вкладка "Дата" ---
     def create_date_tab(self):
         tab = QWidget()
         layout = QHBoxLayout(tab)
@@ -225,6 +235,7 @@ class ModernSearchApp(QMainWindow):
         layout.addWidget(search_btn)
         return tab
 
+    # --- Вкладка "Комбинированный поиск" ---
     def create_combined_tab(self):
         tab = QWidget()
         vlayout = QVBoxLayout(tab)
@@ -252,6 +263,7 @@ class ModernSearchApp(QMainWindow):
         vlayout.addWidget(search_btn, alignment=Qt.AlignmentFlag.AlignLeft)
         return tab
 
+    # --- Вкладка "Имя файла" ---
     def create_filename_tab(self):
         tab = QWidget()
         layout = QHBoxLayout(tab)
@@ -265,13 +277,15 @@ class ModernSearchApp(QMainWindow):
         layout.addWidget(search_btn)
         return tab
 
-    # --- Действия ---
+    # --- Действия пользователя ---
     def browse_directory(self):
+        """Открывает диалог выбора директории и записывает путь в поле."""
         directory = QFileDialog.getExistingDirectory(self, "Выберите директорию")
         if directory:
             self.dir_input.setText(directory)
 
     def start_indexing(self):
+        """Запускает индексацию выбранной директории в отдельном потоке."""
         directory = self.dir_input.text()
         if not directory:
             QMessageBox.warning(self, "Внимание", "Укажите путь к директории!")
@@ -291,6 +305,7 @@ class ModernSearchApp(QMainWindow):
         self.index_thread.start()
 
     def on_indexing_finished(self, success, failed, message):
+        """Обработка завершения индексации: обновляет индекс и интерфейс."""
         self.progress_bar.hide()
         self.tabs.setEnabled(True)
         QMessageBox.information(self, "Индексация", f"{message}\nУспешно: {success}, Ошибок: {failed}")
@@ -299,6 +314,7 @@ class ModernSearchApp(QMainWindow):
         self.parser = setup_search_parser(self.ix.schema)
 
     def display_results(self, results):
+        """Отображает результаты поиска в таблице."""
         self.results_table.setRowCount(0)
         for i, result in enumerate(results):
             self.results_table.insertRow(i)
@@ -311,6 +327,7 @@ class ModernSearchApp(QMainWindow):
         self.results_table.show()
 
     def search_keywords(self):
+        """Поиск по ключевым словам."""
         query = self.keywords_input.text()
         if not query:
             QMessageBox.warning(self, "Внимание", "Введите поисковый запрос!")
@@ -320,6 +337,7 @@ class ModernSearchApp(QMainWindow):
         self.display_results(results)
 
     def search_date(self):
+        """Поиск по диапазону дат."""
         start_date = self.start_date.date().toString("yyyy-MM-dd")
         end_date = self.end_date.date().toString("yyyy-MM-dd")
         with self.ix.searcher() as searcher:
@@ -327,6 +345,7 @@ class ModernSearchApp(QMainWindow):
         self.display_results(results)
 
     def search_combined(self):
+        """Комбинированный поиск: по ключевым словам и дате."""
         query = self.combined_query.text()
         start_date = self.combined_start_date.date().toString("yyyy-MM-dd")
         end_date = self.combined_end_date.date().toString("yyyy-MM-dd")
@@ -341,6 +360,7 @@ class ModernSearchApp(QMainWindow):
         self.display_results(results)
 
     def search_filename(self):
+        """Поиск по имени файла."""
         filename = self.filename_input.text()
         if not filename:
             QMessageBox.warning(self, "Внимание", "Введите имя файла!")
@@ -350,6 +370,7 @@ class ModernSearchApp(QMainWindow):
         self.display_results(results)
 
     def open_file_from_result(self, row, column):
+        """Открывает файл из результатов поиска двойным кликом."""
         path_item = self.results_table.item(row, 0)
         if not path_item:
             return
@@ -369,6 +390,7 @@ class ModernSearchApp(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Ошибка", f"Не удалось открыть файл:\n{e}")
 
+# --- Точка входа в приложение ---
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = ModernSearchApp()

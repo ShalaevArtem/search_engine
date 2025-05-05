@@ -1,0 +1,8 @@
+PyQt6>=6.0.0
+whoosh>=2.7.4
+pdfplumber>=0.5.28
+python-docx>=0.8.11
+nltk>=3.7
+natasha>=1.6.0
+git+https://github.com/ahmados/rusynonyms.git
+tqdm>=4.64.0

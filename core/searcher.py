@@ -18,9 +18,11 @@ from config import Config
 from models.schemas import SearchResult
 from .utils import print_error
 
+# Логирование для отладки и мониторинга
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
+# Инициализация инструментов для русского языка (Natasha, ru_synonyms)
 segmenter = Segmenter()
 emb = NewsEmbedding()
 morph_tagger = NewsMorphTagger(emb)
@@ -28,6 +30,10 @@ morph_vocab = MorphVocab()
 sg = SynonymsGraph()
 
 def lemmatize_ru(word):
+    """
+    Лемматизация слова на русском языке с помощью Natasha.
+    Возвращает лемму слова, если возможно, иначе исходное слово.
+    """
     doc = Doc(word)
     doc.segment(segmenter)
     doc.tag_morph(morph_tagger)
@@ -38,6 +44,9 @@ def lemmatize_ru(word):
     return word
 
 def detect_language(word: str) -> str:
+    """
+    Определяет язык слова: 'ru' для русского, 'en' для английского, иначе 'unknown'.
+    """
     if re.fullmatch(r'[а-яёА-ЯЁ-]+', word):
         return 'ru'
     elif re.fullmatch(r'[a-zA-Z-]+', word):
@@ -46,7 +55,9 @@ def detect_language(word: str) -> str:
 
 @lru_cache(maxsize=Config.MAX_CACHE_SIZE)
 def get_synonyms(word: str) -> List:
-    """Получение синонимов с кэшированием"""
+    """Получает список синонимов для слова (русский и английский).
+    Для русского использует Natasha и ru_synonyms, для английского - WordNet.
+    Результат кэшируется для ускорения повторных запросов."""
     lang = detect_language(word)
 
     if lang == 'ru':
@@ -65,24 +76,46 @@ def get_synonyms(word: str) -> List:
     else:
         return [word]
 
+@lru_cache(maxsize=Config.MAX_CACHE_SIZE)
+def get_cache_synonyms(word):
+    """
+    Кэшированный вызов функции получения синонимов для слова.
+    """
+    return get_synonyms(word)
+
 def setup_search_parser(schema):
-    """Настройка парсера запросов"""
+    """
+    Создаёт и настраивает парсер Whoosh для поиска по содержимому.
+    Добавляет поддержку нечеткого поиска (FuzzyTerm).
+    """
     parser = QueryParser("content", schema, group=OrGroup)
     parser.add_plugin(FuzzyTermPlugin())
     return parser
 
-def tokenize_ru(text: str) -> List[str]: return [t.text for t in tokenize(text)]
+def tokenize_ru(text: str) -> List[str]:
+    """
+    Токенизация русского текста с помощью razdel.
+    Возвращает список токенов.
+    """
+    return [t.text for t in tokenize(text)]
 
 def tokenize_text(text: str, lang: str) -> List[str]:
+    """
+    Токенизация текста в зависимости от языка.
+    Для русского - razdel, для английского - nltk.word_tokenize.
+    """
     if lang == 'ru':
-        # Используем Natasha или razdel
+        # Для русского используем Natasha
         return [token.lower() for token in tokenize_ru(text)]
     else:
-        # Для английского можно оставить nltk.word_tokenize
+        # Для английского используем nltk.word_tokenize
         return [token.lower() for token in word_tokenize(text)]
 
 def search_index(searcher, parser, query_str: str, limit: int = 10, stop_words=None) -> List[SearchResult]:
-    """Поиск по словам с синонимами"""
+    """
+    Поиск документов по запросу с поддержкой синонимов.
+    Сначала выполняет прямой поиск, затем - расширенный с синонимами.
+    """
     if stop_words is None:
         stop_words = set()
 
@@ -130,10 +163,14 @@ def search_index(searcher, parser, query_str: str, limit: int = 10, stop_words=N
         return []
 
 def search_time_range(searcher, start_date_str: str, end_date_str: str, limit: int = 10) -> List[SearchResult]:
-    """Поиск по временному диапазону"""
+    """
+    Поиск документов по временному диапазону (дата изменения).
+    Поддерживает ключевые слова 'сегодня' и 'вчера', а также формат YYYY-MM-DD.
+    """
     start_date = None
     end_date = None
     try:
+        # Обработка относительных дат и строковых дат
         if start_date_str and start_date_str.lower() == 'сегодня':
             start_date = date.today()
         elif start_date_str and start_date_str.lower() == 'вчера':
@@ -150,11 +187,10 @@ def search_time_range(searcher, start_date_str: str, end_date_str: str, limit: i
 
         results = []
         if start_date and end_date:
-            # Преобразуем date в datetime для DateRange
             start_datetime = datetime.combine(start_date, datetime.min.time())
             end_datetime = datetime.combine(end_date, datetime.max.time())
 
-            date_query = DateRange("last_modified", start_datetime, end_datetime)  # Используем объекты datetime
+            date_query = DateRange("last_modified", start_datetime, end_datetime)
             hits = searcher.search(date_query, limit=limit)
             for hit in hits:
                 results.append({
@@ -189,18 +225,10 @@ def search_time_range(searcher, start_date_str: str, end_date_str: str, limit: i
         return []
     return results
 
-@lru_cache(maxsize=Config.MAX_CACHE_SIZE)
-def get_cache_synonyms(word):
-    """
-    Возвращает список синонимов для слова (русского или английского)
-    с кэшированием результата.
-    """
-    return get_synonyms(word)
-
 def combined_search(searcher, parser, params: dict, stop_words=None) -> List[SearchResult]:
     """
-    Комбинированный поиск по временному диапазону
-    и словам с синонимами
+    Комбинированный поиск: по словам (с синонимами) и по временному диапазону.
+    Сначала ищет точное совпадение, затем с учетом синонимов.
     """
     if stop_words is None:
         stop_words = set()
@@ -256,21 +284,27 @@ def combined_search(searcher, parser, params: dict, stop_words=None) -> List[Sea
         return []
 
 def _normalize_filename(filename):
-    """Преобразует имя файла в строку для сравнения."""
+    """
+    Приводит имя файла к строке в нижнем регистре для сравнения.
+    Поддерживает bytes, str, int.
+    """
     if isinstance(filename, bytes):
         try:
             return filename.decode('utf-8').lower()
         except UnicodeDecodeError:
-            return None  # Или другое значение по умолчанию
+            return None
     elif isinstance(filename, str):
         return filename.lower()
     elif isinstance(filename, int):
-        return str(filename).lower()  # Преобразуем число в строку
+        return str(filename).lower()
     else:
-        return None  # Пропускаем неизвестные форматы
+        return None
 
 def search_by_filename(searcher, filename: str) -> List[SearchResult]:
-    """Поиск по имени файла с обработкой всех форматов данных"""
+    """
+    Поиск документов по имени файла с поддержкой нечеткого и wildcard поиска.
+    Корректно работает с разными типами данных в поле filename.
+    """
     filename_query = filename.lower().strip()
 
     analyzer = StandardAnalyzer()
