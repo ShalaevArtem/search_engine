@@ -18,8 +18,8 @@
 
 **Шаг 1. Клонирование репозитория**
 
-git clone https://github.com/yourusername/yourproject.git
-cd yourproject
+git clone https://github.com/ShalaevArtem/search_engine.git
+cd search_engine
 
 **Шаг 2. Создание и активация виртуального окружения**
 
