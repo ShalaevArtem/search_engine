@@ -52,7 +52,7 @@ class IndexThread(QThread):
             self.finished.emit(0, 0, f"Ошибка: {str(e)}")
 
 # --- Основное окно приложения ---
-class ModernSearchApp(QMainWindow):
+class FileSearchApp(QMainWindow):
     """Главный класс GUI поисковой системы."""
     def __init__(self):
         super().__init__()
@@ -393,6 +393,6 @@ class ModernSearchApp(QMainWindow):
 # --- Точка входа в приложение ---
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = ModernSearchApp()
+    window = FileSearchApp()
     window.show()
     sys.exit(app.exec())
