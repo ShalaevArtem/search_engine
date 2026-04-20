@@ -1,5 +1,7 @@
 from whoosh import fields
 from whoosh.analysis import StemmingAnalyzer, StandardAnalyzer
+from typing import TypedDict, Optional, Dict
+from datetime import datetime
 
 # Схема индекса Whoosh для полнотекстового поиска
 search_schema = fields.Schema(
@@ -26,11 +28,13 @@ search_schema = fields.Schema(
     )
 )
 
-# Типы данных для аннотаций
-from typing import Dict, TypedDict
-
 # Результат поиска: словарь с путем, оценкой релевантности и датой изменения
-SearchResult = Dict[str, str]
+#SearchResult = Dict[str, str]
+class SearchResult(TypedDict, total=False):
+    path: str
+    score: float
+    last_modified: Optional[datetime]
+    filename: Optional[str]
 
 # Параметры для комбинированного поиска (с проверкой типов)
 class CombinedSearchParams(TypedDict):

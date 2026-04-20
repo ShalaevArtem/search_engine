@@ -1,16 +1,22 @@
 import logging
 import re
 import string
+import traceback
+
+import nltk
 from datetime import datetime, time, date, timedelta
 from functools import lru_cache
 from typing import List
+from pathlib import Path
+import pymorphy3
+from ru_synonyms import SynonymsGraph
+import sys
 
 from whoosh.analysis import StandardAnalyzer
 from whoosh.qparser import QueryParser, FuzzyTermPlugin, OrGroup
 from whoosh.query import Term, And, Or, DateRange, FuzzyTerm, Wildcard
 from nltk import word_tokenize
 from nltk.corpus import wordnet as wn
-from natasha import Segmenter, NewsEmbedding, NewsMorphTagger, MorphVocab, Doc
 from ru_synonyms import SynonymsGraph
 from razdel import tokenize
 
@@ -18,30 +24,41 @@ from config import Config
 from models.schemas import SearchResult
 from .utils import print_error
 
+def validate_query(query: str) -> tuple[bool, str]:
+    """Проверяет длину и наличие опасных символов."""
+    if not query or not query.strip():
+        return False, "Запрос пустой"
+    if len(query) > Config.MAX_QUERY_LENGTH:
+        return False, f"Запрос слишком длинный (макс {Config.MAX_QUERY_LENGTH} символов)"
+    return True, ""
+
+# --- Логгер для отладки поиска (TEST: УДАЛИТЬ)---
+search_logger = logging.getLogger("search_debug")
+if not search_logger.handlers:
+    _handler = logging.StreamHandler(sys.stdout)
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    search_logger.addHandler(_handler)
+    search_logger.setLevel(logging.INFO)
+
 # Логирование для отладки и мониторинга
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 # Инициализация инструментов для русского языка (Natasha, ru_synonyms)
-segmenter = Segmenter()
-emb = NewsEmbedding()
-morph_tagger = NewsMorphTagger(emb)
-morph_vocab = MorphVocab()
+morph = pymorphy3.MorphAnalyzer()
 sg = SynonymsGraph()
 
+#Локальная папка для NLTK данных
+nltk_data_dir = Path(__file__).parent.parent / "nltk_data"
+if nltk_data_dir.exists() and str(nltk_data_dir) not in nltk.data.path:
+    nltk.data.path.append(str(nltk_data_dir))
+
 def lemmatize_ru(word):
-    """
-    Лемматизация слова на русском языке с помощью Natasha.
-    Возвращает лемму слова, если возможно, иначе исходное слово.
-    """
-    doc = Doc(word)
-    doc.segment(segmenter)
-    doc.tag_morph(morph_tagger)
-    for token in doc.tokens:
-        token.lemmatize(morph_vocab)
-    if doc.tokens:
-        return doc.tokens[0].lemma
-    return word
+    """Лемматизация русского слова через pymorphy3."""
+    if not word or word.strip() in string.punctuation:
+        return word
+    p = morph.parse(word)[0]
+    return p.normal_form
 
 def detect_language(word: str) -> str:
     """
@@ -78,9 +95,7 @@ def get_synonyms(word: str) -> List:
 
 @lru_cache(maxsize=Config.MAX_CACHE_SIZE)
 def get_cache_synonyms(word):
-    """
-    Кэшированный вызов функции получения синонимов для слова.
-    """
+    """ Кэшированный вызов функции получения синонимов для слова. """
     return get_synonyms(word)
 
 def setup_search_parser(schema):
@@ -99,6 +114,13 @@ def tokenize_ru(text: str) -> List[str]:
     """
     return [t.text for t in tokenize(text)]
 
+def tokenize_en(text: str) -> List[str]:
+    """
+    Токенизация английского текста.
+    Сохраняет апострофы в сокращениях (don't, it's), убирает пунктуацию.
+    """
+    return re.findall(r"\b[a-zA-Z0-9']+\b", text.lower())
+
 def tokenize_text(text: str, lang: str) -> List[str]:
     """
     Токенизация текста в зависимости от языка.
@@ -107,59 +129,106 @@ def tokenize_text(text: str, lang: str) -> List[str]:
     if lang == 'ru':
         # Для русского используем Natasha
         return [token.lower() for token in tokenize_ru(text)]
-    else:
-        # Для английского используем nltk.word_tokenize
-        return [token.lower() for token in word_tokenize(text)]
+    elif lang == 'en':
+        return tokenize_en(text)
+    return text.lower().split()
+
 
 def search_index(searcher, parser, query_str: str, limit: int = 10, stop_words=None) -> List[SearchResult]:
-    """
-    Поиск документов по запросу с поддержкой синонимов.
-    Сначала выполняет прямой поиск, затем - расширенный с синонимами.
-    """
     if stop_words is None:
         stop_words = set()
+
+    search_logger.info(f"ЗАПРОС: '{query_str}'") #TEST: УДАЛИТЬ
 
     # Прямой поиск
     try:
         query = parser.parse(query_str)
-        results = searcher.search(query, limit=limit)
+        results = searcher.search(query, limit=limit, terms=True)
         if results:
-            return [{
-                'path': hit['path'],
-                'score': hit.score,
-                'last_modified': hit.get('last_modified')
-            } for hit in results]
-    except Exception as e:
-        print_error(f"Ошибка при прямом поиске: {e}")
-        return []
+            results_list = list(results)
+            search_logger.info(f"Поиск с расширением: найдено {len(results_list)} документов") #TEST: УДАЛИТЬ
 
-    # Поиск с синонимами
+            formatted = []
+            for hit in results_list:
+                matched = []
+                try:
+                    # matched_terms() может отсутствовать или вернуть итератор, который нельзя перебрать
+                    matched = list(set(t[1] for t in hit.matched_terms() if t[0] == 'content'))
+                except AttributeError:
+                    # Метод не поддерживается в этой версии Whoosh → просто возвращаем пустой список
+                    matched = []
+                except Exception as ex:
+                    search_logger.error(f"matched_terms error: {type(ex).__name__}: {ex}") #TEST: УДАЛИТЬ
+                    matched = []
+
+                formatted.append({
+                    'path': hit['path'],
+                    'score': hit.score,
+                    'last_modified': hit.get('last_modified'),
+                    'matched_terms': matched
+                })
+            return formatted
+    except Exception as e:
+        search_logger.error(f"Ошибка при прямом поиске: {e}") #TEST: УДАЛИТЬ
+
+    # Поиск с расширением (Or + бустинг)
     try:
         lang = detect_language(query_str)
         tokens = tokenize_text(query_str, lang)
+        words = [w.lower() for w in tokens if w not in stop_words and w not in string.punctuation]
+        search_logger.info(f"Токены: {words}") #TEST: УДАЛИТЬ
 
-        words = [
-            w.lower()
-            for w in tokens
-            if w not in stop_words and w not in string.punctuation
-        ]
         synonym_queries = []
         for word in words:
             synonyms = get_cache_synonyms(word)
+            search_logger.info(f"  '{word}' → {synonyms[:Config.MAX_SYNONYMS]}") #TEST: УДАЛИТЬ
             if synonyms:
-                term_queries = [Term("content", syn) for syn in synonyms[:Config.MAX_SYNONYMS]]
-                synonym_queries.append(Or(term_queries))
+                synonym_queries.append(Or([Term("content", s) for s in synonyms[:Config.MAX_SYNONYMS]]))
+
         if synonym_queries:
-            combined_query = And(synonym_queries)
-            results = searcher.search(combined_query, limit=limit)
-            return [{
-                'path': hit['path'],
-                'score': hit.score,
-                'last_modified': hit.get('last_modified')
-            } for hit in results]
+            # .boost = value (свойство, а не метод)
+            synonym_expansion = Or(synonym_queries)
+            synonym_expansion.boost = 0.6
+
+            original_query = parser.parse(query_str)
+            original_query.boost = 2.0
+
+            final_query = Or([original_query, synonym_expansion])
+
+            results = searcher.search(final_query, limit=limit, terms=True)
+            if results:
+                results_list = list(results)
+                search_logger.info(f"Поиск с расширением: найдено {len(results_list)} документов") #TEST: УДАЛИТЬ
+
+                formatted = []
+                for hit in results_list:
+                    matched = []
+                    try:
+                        # Декодируем байты в строки UTF-8
+                        matched = list(set(
+                            t[1].decode('utf-8') if isinstance(t[1], bytes) else str(t[1])
+                            for t in hit.matched_terms()
+                            if t[0] == 'content'
+                        ))
+                    except AttributeError:
+                        # Метод не поддерживается в этой версии Whoosh → просто возвращаем пустой список
+                        matched = []
+                    except Exception as ex:
+                        search_logger.error(f"matched_terms error: {type(ex).__name__}: {ex}") #TEST: УДАЛИТЬ
+                        matched = []
+
+                    formatted.append({
+                        'path': hit['path'],
+                        'score': hit.score,
+                        'last_modified': hit.get('last_modified'),
+                        'matched_terms': matched
+                    })
+                return formatted
+
+        search_logger.info("Ничего не найдено") #TEST: УДАЛИТЬ
         return []
     except Exception as e:
-        print_error(f"Ошибка при поиске с синонимами: {e}")
+        search_logger.error(f"Ошибка при поиске с синонимами: {type(e).__name__}: {e}\n{traceback.format_exc()}") #TEST: УДАЛИТЬ
         return []
 
 def search_time_range(searcher, start_date_str: str, end_date_str: str, limit: int = 10) -> List[SearchResult]:
@@ -212,7 +281,7 @@ def search_time_range(searcher, start_date_str: str, end_date_str: str, limit: i
             end_datetime = datetime.combine(end_date, datetime.max.time())
             date_query = DateRange("last_modified", datetime.combine(date(1970, 1, 1), datetime.min.time()),
                                    end_datetime)
-            hits = searcher.search(date_query, limit=limit)
+            hits = searcher.search(date_query, limit=limit, terms=True)
             for hit in hits:
                 results.append({
                     'path': hit['path'],
@@ -225,62 +294,72 @@ def search_time_range(searcher, start_date_str: str, end_date_str: str, limit: i
         return []
     return results
 
-def combined_search(searcher, parser, params: dict, stop_words=None) -> List[SearchResult]:
-    """
-    Комбинированный поиск: по словам (с синонимами) и по временному диапазону.
-    Сначала ищет точное совпадение, затем с учетом синонимов.
-    """
+
+def combined_search(searcher, parser, params: dict, stop_words=None) -> List[SearchResult]: #ДОДЕЛАТЬ (КАК search_index)
     if stop_words is None:
         stop_words = set()
+
+    search_logger.info(f"КОМБО: '{params['query']}' | Даты: {params['start_date']} → {params['end_date']}") #TEST: УДАЛИТЬ
 
     try:
         start_dt = datetime.strptime(params['start_date'], "%Y-%m-%d").date()
         end_dt = datetime.strptime(params['end_date'], "%Y-%m-%d").date()
-        text_query = parser.parse(params['query'])
         date_query = DateRange(
             "last_modified",
             datetime.combine(start_dt, time.min),
             datetime.combine(end_dt, time.max)
         )
 
-        # Прямой поиск
-        combined_query = And([text_query, date_query])
-        results = searcher.search(combined_query, limit=params.get('limit', 10))
+        # Прямой поиск + дата
+        original_query = parser.parse(params['query'])
+        direct_query = And([original_query, date_query])
+        results = searcher.search(direct_query, limit=params.get('limit', 10), terms=True)
         if results:
+            results_list = list(results)
+            search_logger.info(f"Прямой комбо: найдено {len(results_list)} документов")
             return [{
                 'path': hit['path'],
                 'score': hit.score,
                 'last_modified': hit.get('last_modified')
-            } for hit in results]
+            } for hit in results_list]
 
-        # Поиск с синонимами
+        # Поиск с синонимами + дата (Or + бустинг)
         lang = detect_language(params['query'])
         tokens = tokenize_text(params['query'], lang)
+        words = [w.lower() for w in tokens if w not in stop_words and w not in string.punctuation]
+        search_logger.info(f"Токены для комбо: {words}") #TEST: УДАЛИТЬ
 
-        words = [
-            w.lower()
-            for w in tokens
-            if w not in stop_words and w not in string.punctuation
-        ]
         synonym_queries = []
         for word in words:
             synonyms = get_cache_synonyms(word)
+            search_logger.info(f"'{word}' → {synonyms[:Config.MAX_SYNONYMS]}")
             if synonyms:
-                term_queries = [Term("content", syn) for syn in synonyms[:Config.MAX_SYNONYMS]]
-                synonym_queries.append(Or(term_queries))
+                synonym_queries.append(Or([Term("content", s) for s in synonyms[:Config.MAX_SYNONYMS]]))
+
         if synonym_queries:
-            text_query_synonyms = And(synonym_queries)
-            combined_query_synonyms = And([text_query_synonyms, date_query])
-            results = searcher.search(combined_query_synonyms, limit=params.get('limit', 10))
-            return [{
-                'path': hit['path'],
-                'score': hit.score,
-                'last_modified': hit.get('last_modified')
-            } for hit in results]
-        else:
-            return []
+            synonym_expansion = Or(synonym_queries)
+            synonym_expansion.boost = 0.6
+
+            original_boosted = parser.parse(params['query'])
+            original_boosted.boost = 2.0
+
+            text_query = Or([original_boosted, synonym_expansion])
+            combined_query = And([text_query, date_query])
+
+            results = searcher.search(combined_query, limit=params.get('limit', 10), terms=True)
+            if results:
+                results_list = list(results)
+                search_logger.info(f"Комбо по синонимам: найдено {len(results_list)} документов") #TEST: УДАЛИТЬ
+                return [{
+                    'path': hit['path'],
+                    'score': hit.score,
+                    'last_modified': hit.get('last_modified')
+                } for hit in results_list]
+
+        search_logger.info("Комбо поиск не дал результатов") #TEST: УДАЛИТЬ
+        return []
     except Exception as e:
-        print_error(f"Ошибка в combined_search: {e}")
+        logger.error(f"Ошибка в combined_search: {e}")
         return []
 
 def _normalize_filename(filename):
@@ -301,38 +380,22 @@ def _normalize_filename(filename):
         return None
 
 def search_by_filename(searcher, filename: str) -> List[SearchResult]:
-    """
-    Поиск документов по имени файла с поддержкой нечеткого и wildcard поиска.
-    Корректно работает с разными типами данных в поле filename.
-    """
-    filename_query = filename.lower().strip()
+    """Поиск документов по имени файла"""
+    filename_query = filename.strip().lower()
+    if not filename_query:
+        return []
 
-    analyzer = StandardAnalyzer()
-    query_parts = [part.text for part in analyzer(filename_query)] # Упрощенный список частей запроса
+    # Нативные запросы Whoosh: точное начало + нечёткое + wildcard
+    prefix_q = FuzzyTerm("filename", filename_query, boost=2.0)
+    wildcard_q = Wildcard("filename", f"*{filename_query}*")
+    fuzzy_q = FuzzyTerm("filename", filename_query, maxdist=2)
 
-    queries = []
-    for part in query_parts:
-        wildcard_query = Wildcard("filename", f"*{part}*")
-        fuzzy_query = FuzzyTerm("filename", part, maxdist=2)
-        queries.append(Or([wildcard_query, fuzzy_query]))
-
-    if len(queries) > 1:
-        query = And(queries)
-    else:
-        query = queries[0]
-
+    query = Or([prefix_q, wildcard_q, fuzzy_q])
     results = searcher.search(query, limit=Config.FILE_SEARCH_LIMIT)
 
-    matched_docs = []
-    for hit in results:
-        doc_filename = hit['filename']
-        doc_str = _normalize_filename(doc_filename)
-
-        if doc_str and (doc_str.startswith(filename_query) or filename_query in doc_str):
-            matched_docs.append({
-                'path': hit['path'],
-                'filename': doc_str,
-                'last_modified': hit['last_modified'],
-                'score': hit.score
-            })
-    return matched_docs
+    return [{
+        'path': hit['path'],
+        'filename': hit.get('filename', ''),
+        'score': hit.score,
+        'last_modified': hit.get('last_modified')
+    } for hit in results]

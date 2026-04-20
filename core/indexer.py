@@ -1,14 +1,11 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Any
-from typing import Optional, Tuple, Callable
-
+from typing import List, Dict, Any, Optional, Tuple, Callable
 import pdfplumber
 from docx import Document as DocxDocument
 from whoosh import index
 from whoosh.writing import IndexWriter
-
 from config import Config
 from models.schemas import search_schema
 from .utils import print_error, print_success
@@ -41,12 +38,11 @@ class FileIndexer:
                         if text:
                             full_text.append(text[:Config.PDF_TEXT_LIMIT])
                     except Exception as e:
-                        print(f"Ошибка на странице: {e}")
+                        print(f"Ошибка на странице: {e}") #TEST: УДАЛИТЬ
                         continue
-
             return " ".join(full_text) if full_text else None
         except Exception as e:
-            print(f"Ошибка обработки PDF {file_path}: {e}")
+            print(f"Ошибка обработки PDF {file_path}: {e}") #TEST: УДАЛИТЬ
             return None
 
     @staticmethod
@@ -93,10 +89,8 @@ class FileIndexer:
             if not index_dir.exists():
                 index_dir.mkdir(parents=True)
                 return index.create_in(index_dir, schema=search_schema)
-
             if index.exists_in(index_dir):
                 return index.open_dir(index_dir)
-
             return index.create_in(index_dir, schema=search_schema)
         except Exception as e:
             print_error(f"Ошибка открытия индекса: {e}")
@@ -105,26 +99,48 @@ class FileIndexer:
     @staticmethod
     def index_files(directory: Path, progress_callback: Callable[[int], None] = None) -> Tuple[int, int]:
         """
-        Основной метод индексации файлов из директории с многопоточной обработкой.
-        - Получает список файлов для индексации.
-        - Параллельно извлекает текст и метаданные из файлов.
-        - Записывает документы в индекс в однопоточном режиме.
-        - Вызывает callback с прогрессом, если он передан.
-        - Оптимизирует индекс при большом количестве файлов.
-        - Возвращает количество успешно и неуспешно обработанных файлов.
+        Основная метод индексации с пакетной записью и очисткой удалённых файлов.
+        - Удаляет из индекса документы, чьи файлы больше не существуют на диске.
+        - Извлекает текст многопоточно.
+        - Записывает документы пакетами по Config.BATCH_SIZE (защита от MemoryError).
         """
-        files = FileIndexer._get_files_to_index(directory)
-        if not files:
+        files_to_index = FileIndexer._get_files_to_index(directory)
+        if not files_to_index:
             print_error("Поддерживаемые файлы не найдены")
             return 0, 0
 
-        ix = FileIndexer.create_or_open_index(Config.INDEX_DIR)
-        docs: List[Dict[str, Any]] = []
+        ix = FileIndexer.get_index(Config.INDEX_DIR)
+
+        #ОЧИСТКА УДАЛЁННЫХ ФАЙЛОВ ИЗ ИНДЕКСА
+        deleted_count = 0
+        try:
+            with ix.searcher() as searcher:
+                # Собираем все пути, которые сейчас есть в индексе
+                indexed_paths = {fields.get("path") for fields in searcher.all_stored_fields()}
+
+            # Собираем все реальные пути из целевой директории
+            valid_paths = {str(f.resolve()) for f in files_to_index}
+
+            # Находим пути, которые есть в индексе, но отсутствуют на диске
+            paths_to_remove = indexed_paths - valid_paths
+
+            if paths_to_remove:
+                with ix.writer() as writer:
+                    for path in paths_to_remove:
+                        writer.delete_by_term("path", path)
+                deleted_count = len(paths_to_remove)
+                print_success(f"Очищено из индекса: {deleted_count} удалённых файлов") #TEST: УДАЛИТЬ
+        except Exception as e:
+            print_error(f"Ошибка при синхронизации индекса: {e}")
+
+        #МНОГОПОТОЧНОЕ ИЗВЛЕЧЕНИЕ + ПАКЕТНАЯ ЗАПИСЬ
         success = 0
         failed = 0
+        processed = 0
+        total_files = len(files_to_index)
+        batch: List[Dict[str, Any]] = []
 
-        def process_file(file_path: Path) -> Dict[str, Any]:
-            # Вспомогательная функция для извлечения текста и метаданных из одного файла
+        def process_file(file_path: Path) -> Optional[Dict[str, Any]]:
             try:
                 content = FileIndexer._extract_text(file_path)
                 last_modified = datetime.fromtimestamp(file_path.stat().st_mtime)
@@ -138,37 +154,44 @@ class FileIndexer:
                 print_error(f"Ошибка обработки файла {file_path}: {e}")
                 return None
 
-        total_files = len(files)
-        processed = 0
-
-        # Многопоточная обработка файлов для ускорения извлечения текста
         with ThreadPoolExecutor(max_workers=Config.WORKERS) as executor:
-            futures = [executor.submit(process_file, f) for f in files]
+            futures = {executor.submit(process_file, f): f for f in files_to_index}
             for future in as_completed(futures):
                 doc = future.result()
                 if doc:
-                    docs.append(doc)
+                    batch.append(doc)
                     success += 1
                 else:
                     failed += 1
+
                 processed += 1
                 if progress_callback:
-                    progress = int(processed / total_files * 100)
-                    progress_callback(progress)
+                    progress_callback(int(processed / total_files * 100))
 
-        # Запись всех документов в индекс в однопоточном режиме
-        with ix.writer() as writer:
-            for doc in docs:
-                writer.update_document(**doc)
+                # Пакетная запись в индекс (разгружает память)
+                if len(batch) >= Config.BATCH_SIZE:
+                    try:
+                        with ix.writer() as writer:
+                            for d in batch:
+                                writer.update_document(**d)
+                        batch.clear()
+                    except Exception as e:
+                        print_error(f"Ошибка записи пакета в индекс: {e}")
 
-        print_success(f"Проиндексировано файлов: {success}")
-        if failed:
-            print_error(f"Ошибок при обработке файлов: {failed}")
+        # Записываем оставшийся "хвост"
+        if batch:
+            try:
+                with ix.writer() as writer:
+                    for d in batch:
+                        writer.update_document(**d)
+            except Exception as e:
+                print_error(f"Ошибка записи остатка в индекс: {e}")
 
-        # Оптимизация индекса при большом количестве документов
-        if len(files) > 10000:
+        # Оптимизация сегментов при большом объёме (ускоряет поиск)
+        if total_files > Config.BATCH_SIZE * 100:
             ix.optimize()
 
+        print_success(f"Индексация завершена. Добавлено/обновлено: {success} | Ошибок: {failed}") #TEST: УДАЛИТЬ
         return success, failed
 
     @staticmethod
@@ -182,29 +205,6 @@ class FileIndexer:
             if f.suffix.lower() in Config.SUPPORTED_EXTENSIONS
                and f.stat().st_size >= Config.PDF_MIN_SIZE
         ]
-
-    @staticmethod
-    def _process_batch(writer: IndexWriter, batch: List[Path]) -> Tuple[int, int]:
-        """
-        Обрабатывает пакет файлов: извлекает текст и добавляет документы в индекс.
-        Используется для пакетной индексации (не используется в основном методе).
-        Возвращает количество успешно обработанных файлов и общий размер пакета.
-        """
-        success = 0
-        for file_path in batch:
-            text = FileIndexer._extract_text(file_path)
-            try:
-                print(f"Индексируем файл: {file_path.name}, тип: {type(file_path.name)}")
-                writer.add_document(
-                    path=str(file_path.absolute()),
-                    filename=str(file_path.name.lower()),
-                    content=text,
-                    last_modified=datetime.fromtimestamp(file_path.stat().st_mtime)
-                )
-                success += 1
-            except Exception as e:
-                print_error(f"Indexing error {file_path}: {e}")
-        return success, len(batch)
 
     @staticmethod
     def _extract_text(file_path: Path) -> Optional[str]:

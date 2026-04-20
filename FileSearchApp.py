@@ -2,6 +2,7 @@ import subprocess
 import sys
 import os
 import pathlib
+import re
 
 # --- Исправление путей к ресурсам при запуске из .exe (PyInstaller) ---
 if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
@@ -20,7 +21,8 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QDateEdit, QTableWidget, QTableWidgetItem,
-    QFileDialog, QMessageBox, QHeaderView, QProgressBar, QDialog, QTextEdit
+    QFileDialog, QMessageBox, QHeaderView, QProgressBar, QDialog, QTextEdit, QFormLayout, QInputDialog, QCheckBox,
+    QTextBrowser
 )
 from PyQt6.QtCore import Qt, QDate, QThread, pyqtSignal
 
@@ -28,11 +30,12 @@ from PyQt6.QtCore import Qt, QDate, QThread, pyqtSignal
 from core.indexer import FileIndexer
 from core.searcher import (
     setup_search_parser, search_index, search_time_range,
-    combined_search, search_by_filename
+    combined_search, search_by_filename, validate_query
 )
+from core.auth_manager import auth_manager
+from core.access_control import filter_results_by_access, check_file_access
 from config import Config
 
-# --- Поток для индексации с прогресс-баром ---
 class IndexThread(QThread):
     """Отдельный поток для индексации файлов с поддержкой прогресса."""
     progress = pyqtSignal(int)
@@ -51,7 +54,256 @@ class IndexThread(QThread):
         except Exception as e:
             self.finished.emit(0, 0, f"Ошибка: {str(e)}")
 
-# --- Основное окно приложения ---
+
+class LoginDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Вход в систему")
+        self.setMinimumSize(380, 220)
+        self.setStyleSheet("""
+            QDialog { background-color: #18191c; color: #e0e0e0; font-size: 12px; }
+            QLineEdit { background-color: #2c2f33; border: 1px solid #444; padding: 6px; color: #e0e0e0; border-radius: 4px; }
+            QPushButton { background-color: #7289da; color: white; border: none; padding: 8px 16px; border-radius: 4px; font-weight: bold; }
+            QPushButton:hover { background-color: #5f73bc; }
+            QLabel.error { color: #ff5555; font-size: 11px; min-height: 16px; }
+            QCheckBox { color: #aaa; }
+        """)
+
+        layout = QFormLayout(self)
+        layout.setSpacing(10)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        self.user_input = QLineEdit()
+        self.user_input.setPlaceholderText("Логин")
+        self.pass_input = QLineEdit()
+        self.pass_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.pass_input.setPlaceholderText("Пароль")
+
+        self.remember_cb = QCheckBox("Запомнить меня (30 дней)")
+        self.error_label = QLabel()
+        self.error_label.setObjectName("error")
+        self.btn_login = QPushButton("Войти")
+
+        layout.addRow("Логин:", self.user_input)
+        layout.addRow("Пароль:", self.pass_input)
+        layout.addRow(self.remember_cb)
+        layout.addRow(self.error_label)
+        layout.addRow(self.btn_login)
+
+        self.btn_login.clicked.connect(self.try_login)
+        self.pass_input.returnPressed.connect(self.try_login)
+
+    def try_login(self):
+        from core.auth_manager import auth_manager
+        u, p = self.user_input.text().strip(), self.pass_input.text()
+        if not u or not p:
+            self.error_label.setText("Заполните все поля")
+            return
+
+        if auth_manager.create_session_token(u, p, self.remember_cb.isChecked()):
+            self.done(QDialog.DialogCode.Accepted)
+        else:
+            self.error_label.setText("Неверный логин или пароль")
+            self.pass_input.clear()
+
+
+class UserManagementDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Управление пользователями")
+        self.setMinimumSize(500, 350)
+        self.setStyleSheet("""
+            QDialog { background-color: #18191c; color: #e0e0e0; }
+            QPushButton { background-color: #43b581; padding: 6px 12px; border-radius: 4px; }
+            QPushButton:hover { background-color: #3ca374; }
+            QPushButton.danger { background-color: #f04747; }
+            QPushButton.danger:hover { background-color: #d63c3c; }
+            QTableWidget { background-color: #23272a; color: #e0e0e0; gridline-color: #333; }
+        """)
+
+        layout = QVBoxLayout(self)
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["ID", "Логин", "Роль", "Активен"])
+        layout.addWidget(self.table)
+
+        btns = QHBoxLayout()
+        self.btn_create = QPushButton("Создать")
+        self.btn_toggle = QPushButton("Блок/Разблок")
+        self.btn_delete = QPushButton("Удалить")
+        self.btn_delete.setObjectName("danger")
+        btns.addWidget(self.btn_create)
+        btns.addWidget(self.btn_toggle)
+        btns.addWidget(self.btn_delete)
+        layout.addLayout(btns)
+
+        self.btn_create.clicked.connect(self.create_user)
+        self.btn_toggle.clicked.connect(self.toggle_active)
+        self.btn_delete.clicked.connect(self.delete_user)
+
+        self.load_users()
+
+    def load_users(self):
+        from models.database import SessionLocal, User, Role
+        db = SessionLocal()
+        try:
+            users = db.query(User).all()
+            self.table.setRowCount(len(users))
+            for i, u in enumerate(users):
+                self.table.setItem(i, 0, QTableWidgetItem(str(u.id)))
+                self.table.setItem(i, 1, QTableWidgetItem(u.username))
+                roles = ", ".join([r.name for r in u.roles])
+                self.table.setItem(i, 2, QTableWidgetItem(roles))
+                self.table.setItem(i, 3, QTableWidgetItem("✅" if u.is_active else "❌"))
+        finally:
+            db.close()
+
+    def create_user(self):
+        username, ok1 = QInputDialog.getText(self, "Новый пользователь", "Логин:")
+        if not ok1 or not username.strip(): return
+        password, ok2 = QInputDialog.getText(self, "Новый пользователь", "Пароль:", QLineEdit.EchoMode.Password)
+        if not ok2: return
+
+        from models.database import SessionLocal, User, Role
+        from core.auth_manager import hash_password
+        db = SessionLocal()
+        try:
+            if db.query(User).filter(User.username == username).first():
+                QMessageBox.warning(self, "Ошибка", "Пользователь уже существует")
+                return
+            role = db.query(Role).filter(Role.name == "user").first()
+            new_user = User(username=username.strip(), password_hash=hash_password(password), is_active=True)
+            new_user.roles.append(role)
+            db.add(new_user)
+            db.commit()
+            self.load_users()
+        finally:
+            db.close()
+
+    def toggle_active(self):
+        row = self.table.currentRow()
+        if row == -1: return
+        uid = int(self.table.item(row, 0).text())
+        from models.database import SessionLocal, User
+        db = SessionLocal()
+        try:
+            u = db.query(User).filter(User.id == uid).first()
+            if u:
+                u.is_active = not u.is_active
+                db.commit()
+                self.load_users()
+        finally:
+            db.close()
+
+    def delete_user(self):
+        row = self.table.currentRow()
+        if row == -1: return
+        uid = int(self.table.item(row, 0).text())
+        if QMessageBox.question(self, "Подтверждение", "Удалить пользователя?") != QMessageBox.StandardButton.Yes: return
+        from models.database import SessionLocal, User
+        db = SessionLocal()
+        try:
+            db.query(User).filter(User.id == uid).delete()
+            db.commit()
+            self.load_users()
+        finally:
+            db.close()
+
+
+class ACLManagementDialog(QDialog):
+    """Диалог управления правилами доступа к файлам/папкам."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("📂 Управление доступом (ACL)")
+        self.setMinimumSize(650, 400)
+        self.setStyleSheet("""
+            QDialog { background-color: #18191c; color: #e0e0e0; }
+            QPushButton { background-color: #7289da; padding: 6px 12px; border-radius: 4px; }
+            QPushButton:hover { background-color: #5f73bc; }
+            QPushButton.danger { background-color: #f04747; }
+            QTableWidget { background-color: #23272a; color: #e0e0e0; gridline-color: #333; }
+        """)
+
+        layout = QVBoxLayout(self)
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["ID", "Маска пути", "Доступно ролям", "Рекурсивно"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.table)
+
+        btns = QHBoxLayout()
+        self.btn_add = QPushButton("Добавить правило")
+        self.btn_delete = QPushButton("Удалить выбранное")
+        self.btn_delete.setObjectName("danger")
+        btns.addWidget(self.btn_add)
+        btns.addWidget(self.btn_delete)
+        layout.addLayout(btns)
+
+        self.btn_add.clicked.connect(self.add_rule)
+        self.btn_delete.clicked.connect(self.delete_rule)
+        self.load_rules()
+
+    def load_rules(self):
+        from models.database import SessionLocal, DocumentACL
+        db = SessionLocal()
+        try:
+            rules = db.query(DocumentACL).all()
+            self.table.setRowCount(len(rules))
+            for i, r in enumerate(rules):
+                self.table.setItem(i, 0, QTableWidgetItem(str(r.id)))
+                self.table.setItem(i, 1, QTableWidgetItem(r.path_mask))
+                self.table.setItem(i, 2, QTableWidgetItem(r.allowed_roles))
+                self.table.setItem(i, 3, QTableWidgetItem("Да" if getattr(r, 'is_recursive', False) else "Нет"))
+        finally:
+            db.close()
+
+    def add_rule(self):
+        path, ok1 = QInputDialog.getText(self, "Новое правило", "Маска пути (напр. D:\\Docs\\* или *.pdf):")
+        if not ok1 or not path.strip(): return
+        roles, ok2 = QInputDialog.getText(self, "Новое правило", "Роли через запятую (admin,user):")
+        if not ok2 or not roles.strip(): return
+        recursive = QMessageBox.question(self, "Рекурсия?",
+                                         "Применять к вложенным файлам и папкам?") == QMessageBox.StandardButton.Yes
+
+        from models.database import SessionLocal, DocumentACL
+        db = SessionLocal()
+        try:
+            if db.query(DocumentACL).filter(DocumentACL.path_mask == path.strip()).first():
+                QMessageBox.warning(self, "Ошибка", "Такое правило уже существует")
+                return
+            db.add(DocumentACL(
+                path_mask=path.strip().lower(),
+                allowed_roles=roles.strip().replace(" ", ""),
+                is_recursive=recursive
+            ))
+            db.commit()
+            self.load_rules()
+            # Сбрасываем кэш ACL, чтобы новые правила применились сразу
+            from core.access_control import get_acl_rules
+            import core.access_control
+            core.access_control._cached_acl = None
+        finally:
+            db.close()
+
+    def delete_rule(self):
+        row = self.table.currentRow()
+        if row == -1: return
+        rule_id = int(self.table.item(row, 0).text())
+        mask = self.table.item(row, 1).text()
+        if QMessageBox.question(self, "Подтверждение",
+                                f"Удалить правило '{mask}'?") != QMessageBox.StandardButton.Yes: return
+
+        from models.database import SessionLocal, DocumentACL
+        db = SessionLocal()
+        try:
+            db.query(DocumentACL).filter(DocumentACL.id == rule_id).delete()
+            db.commit()
+            self.load_rules()
+            from core.access_control import get_acl_rules
+            import core.access_control
+            core.access_control._cached_acl = None
+        finally:
+            db.close()
+
 class FileSearchApp(QMainWindow):
     """Главный класс GUI поисковой системы."""
     def __init__(self):
@@ -106,6 +358,7 @@ class FileSearchApp(QMainWindow):
         self.setStyleSheet(self.dark_stylesheet())
 
         self.index_thread = None
+        self.last_query = ""
 
     def dark_stylesheet(self):
         """CSS-стили для тёмной темы интерфейса."""
@@ -313,61 +566,121 @@ class FileSearchApp(QMainWindow):
         self.ix = FileIndexer.get_index(Config.INDEX_DIR)
         self.parser = setup_search_parser(self.ix.schema)
 
+    def _get_user_roles(self):
+        """Безопасно возвращает роли текущего пользователя или пустой список."""
+        from core.auth_manager import auth_manager
+        user = auth_manager.get_current_user()
+        return user.roles if user and user.roles else []
+
     def display_results(self, results):
-        """Отображает результаты поиска в таблице."""
+        """Отображает результаты"""
         self.results_table.setRowCount(0)
-        for i, result in enumerate(results):
-            self.results_table.insertRow(i)
-            path_item = QTableWidgetItem(result.get('path', ''))
-            score_item = QTableWidgetItem(f"{result.get('score', 0):.2f}" if 'score' in result else "")
-            date_item = QTableWidgetItem(str(result.get('last_modified', '')))
-            self.results_table.setItem(i, 0, path_item)
-            self.results_table.setItem(i, 1, score_item)
-            self.results_table.setItem(i, 2, date_item)
-        self.results_table.show()
+
+        self.results_table.setColumnCount(4)
+        self.results_table.setHorizontalHeaderLabels(["Путь", "Score", "Дата", "Действие"])
+        self.results_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+
+        if not results:
+            self.results_table.hide()
+            QMessageBox.information(self, "Поиск", "Ничего не найдено или нет прав доступа.")
+            return
+
+        try:
+            for i, res in enumerate(results):
+                self.results_table.insertRow(i)
+
+                path = str(res.get('path', ''))
+                score = float(res.get('score', 0.0))
+                date = str(res.get('last_modified', ''))
+
+                self.results_table.setItem(i, 0, QTableWidgetItem(path))
+                self.results_table.setItem(i, 1, QTableWidgetItem(f"{score:.2f}"))
+                self.results_table.setItem(i, 2, QTableWidgetItem(date))
+
+                # Кнопка предпросмотра
+                btn = QPushButton("👁")
+                btn.setFixedWidth(32)
+                btn.setStyleSheet("QPushButton { background-color: #7289da; color: white; border-radius: 3px; }")
+
+                terms = res.get('matched_terms', [])
+                btn.clicked.connect(
+                    lambda checked=False, p=path, t=terms: PreviewDialog(p, t, self).exec()
+                )
+
+                self.results_table.setCellWidget(i, 3, btn)
+
+            self.results_table.show()
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка отображения", f"Не удалось показать результаты:\n{e}")
+            self.results_table.hide()
+
+    def _open_preview(self, file_path: str):
+        """Обёртка для открытия предпросмотра (изолирует логику от таблицы)."""
+        if not hasattr(self, 'PreviewDialog'):
+            # Если класс PreviewDialog ещё не добавлен, пока просто откроем файл системно
+            self.open_file_from_result_by_path(file_path)
+            return
+        self.PreviewDialog(file_path, getattr(self, 'last_query', ''), self).exec()
 
     def search_keywords(self):
-        """Поиск по ключевым словам."""
-        query = self.keywords_input.text()
-        if not query:
+        self.last_query = self.keywords_input.text()
+        if not self.last_query.strip():
             QMessageBox.warning(self, "Внимание", "Введите поисковый запрос!")
             return
-        with self.ix.searcher() as searcher:
-            results = search_index(searcher, self.parser, query)
-        self.display_results(results)
+        try:
+            from core.searcher import search_index
+            from core.access_control import filter_results_by_access
+            with self.ix.searcher() as searcher:
+                res = search_index(searcher, self.parser, self.last_query)
+            self.display_results(filter_results_by_access(res, self._get_user_roles()))
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка поиска", str(e))
 
     def search_date(self):
-        """Поиск по диапазону дат."""
-        start_date = self.start_date.date().toString("yyyy-MM-dd")
-        end_date = self.end_date.date().toString("yyyy-MM-dd")
-        with self.ix.searcher() as searcher:
-            results = search_time_range(searcher, start_date, end_date)
-        self.display_results(results)
+        try:
+            from core.searcher import search_time_range
+            from core.access_control import filter_results_by_access
+            start = self.start_date.date().toString("yyyy-MM-dd")
+            end = self.end_date.date().toString("yyyy-MM-dd")
+            with self.ix.searcher() as searcher:
+                res = search_time_range(searcher, start, end)
+            self.display_results(filter_results_by_access(res, self._get_user_roles()))
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка поиска", str(e))
 
     def search_combined(self):
-        """Комбинированный поиск: по ключевым словам и дате."""
-        query = self.combined_query.text()
-        start_date = self.combined_start_date.date().toString("yyyy-MM-dd")
-        end_date = self.combined_end_date.date().toString("yyyy-MM-dd")
-        params = {
-            'query': query,
-            'start_date': start_date,
-            'end_date': end_date,
-            'limit': 10
-        }
-        with self.ix.searcher() as searcher:
-            results = combined_search(searcher, self.parser, params)
-        self.display_results(results)
+        self.last_query = self.combined_query.text()
+        if not self.last_query:
+            QMessageBox.warning(self, "Внимание", "Введите запрос!")
+            return
+        try:
+            from core.searcher import combined_search
+            from core.access_control import filter_results_by_access
+            params = {
+                'query': self.last_query,
+                'start_date': self.combined_start_date.date().toString("yyyy-MM-dd"),
+                'end_date': self.combined_end_date.date().toString("yyyy-MM-dd"),
+                'limit': 10
+            }
+            with self.ix.searcher() as searcher:
+                res = combined_search(searcher, self.parser, params)
+            self.display_results(filter_results_by_access(res, self._get_user_roles()))
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка поиска", str(e))
 
     def search_filename(self):
-        """Поиск по имени файла."""
-        filename = self.filename_input.text()
-        if not filename:
+        self.last_query = self.filename_input.text()
+        if not self.last_query:
             QMessageBox.warning(self, "Внимание", "Введите имя файла!")
             return
-        with self.ix.searcher() as searcher:
-            results = search_by_filename(searcher, filename)
-        self.display_results(results)
+        try:
+            from core.searcher import search_by_filename
+            from core.access_control import filter_results_by_access
+            with self.ix.searcher() as searcher:
+                res = search_by_filename(searcher, self.last_query)
+            self.display_results(filter_results_by_access(res, self._get_user_roles()))
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка поиска", str(e))
 
     def open_file_from_result(self, row, column):
         """Открывает файл из результатов поиска двойным кликом."""
@@ -378,6 +691,13 @@ class FileSearchApp(QMainWindow):
         if not os.path.exists(path):
             QMessageBox.warning(self, "Ошибка", "Файл не найден!")
             return
+
+        # Проверка прав перед открытием
+        current_user = auth_manager.get_current_user()
+        if not current_user or not check_file_access(path, current_user.roles):
+            QMessageBox.warning(self, "Отказ в доступе", "У вас нет прав для открытия этого файла.")
+            return
+
         try:
             if sys.platform == "win32":
                 os.startfile(path)
@@ -390,9 +710,155 @@ class FileSearchApp(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Ошибка", f"Не удалось открыть файл:\n{e}")
 
+
+class PreviewDialog(QDialog):
+    def __init__(self, file_path: str, highlight_terms: list, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Предпросмотр: {os.path.basename(file_path)}")
+        self.setMinimumSize(700, 500)
+        self.setStyleSheet("QDialog { background-color: #18191c; color: #e0e0e0; }")
+
+        # Безопасное декодирование терминов
+        self.terms = []
+        if isinstance(highlight_terms, list):
+            for t in highlight_terms:
+                if isinstance(t, bytes):
+                    try:
+                        self.terms.append(t.decode('utf-8'))
+                    except:
+                        pass
+                elif isinstance(t, str) and len(t) > 1:
+                    self.terms.append(t)
+
+        if not self.terms and hasattr(parent, 'last_query') and parent.last_query:
+            self.terms = [parent.last_query]
+
+        layout = QVBoxLayout(self)
+        terms_str = ", ".join(self.terms[:5]) if self.terms else "поиск по дате/имени"
+        info = QLabel(f"Совпавшие термы: <b>{terms_str}</b>")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        self.browser = QTextBrowser()
+        self.browser.setReadOnly(True)
+        self.browser.setStyleSheet(
+            "QTextBrowser { background-color: #23272a; color: #e0e0e0; font-size: 13px; padding: 8px; }")
+        layout.addWidget(self.browser)
+
+        btns = QHBoxLayout()
+        btn_open = QPushButton("📂 Открыть в системе")
+        btn_close = QPushButton("Закрыть")
+        btn_open.clicked.connect(lambda: (os.startfile(file_path) if sys.platform == "win32" else None, self.close()))
+        btn_close.clicked.connect(self.close)
+        btns.addWidget(btn_open)
+        btns.addStretch()
+        btns.addWidget(btn_close)
+        layout.addLayout(btns)
+
+        self.load_and_highlight(file_path)
+
+    def load_and_highlight(self, path: str):
+        try:
+            import os, re
+            ext = os.path.splitext(path)[1].lower()
+            text = ""
+            MAX_CHARS = 50000
+
+            if ext == ".txt":
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    text = f.read(MAX_CHARS)
+            elif ext == ".pdf":
+                import pypdfium2 as pdfium
+                doc = pdfium.PdfDocument(path)
+                for i in range(min(len(doc), 25)):
+                    page = doc[i]
+                    text_page = page.get_textpage()
+                    t = text_page.get_text_bounded()
+                    if t: text += f"\n📄 [Стр. {i + 1}]\n" + t
+                    if len(text) > MAX_CHARS: break
+            elif ext == ".docx":
+                from docx import Document
+                for p in Document(path).paragraphs:
+                    if p.text.strip(): text += p.text + "\n"
+                    if len(text) > MAX_CHARS: break
+
+            if not text.strip():
+                self.browser.setHtml("<h3>Текст не извлечён</h3>")
+                return
+
+            if not self.terms:
+                self.browser.setPlainText(text[:MAX_CHARS])
+                return
+
+            # Экранирование и подсветка
+            safe_terms = [re.escape(t) for t in self.terms if t]
+            if not safe_terms:
+                self.browser.setPlainText(text[:MAX_CHARS])
+                return
+
+            pattern = re.compile('|'.join(safe_terms[:10]), re.IGNORECASE)
+            safe_text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+            highlighted = pattern.sub(
+                lambda
+                    m: f"<mark style='background:#f1c40f; color:#000; padding:2px 4px; border-radius:3px;'>{m.group(0)}</mark>",
+                safe_text
+            )
+            self.browser.setHtml(f"<div style='font-family:Consolas, monospace; line-height:1.5;'>{highlighted}</div>")
+
+        except Exception as e:
+            import traceback
+            self.browser.setHtml(f"""
+                <h3 style='color:#f04747'>Ошибка предпросмотра</h3>
+                <pre style='background:#2c2f33; padding:8px; border-radius:4px; white-space:pre-wrap;'>{traceback.format_exc()[:500]}</pre>
+            """)
+
 # --- Точка входа в приложение ---
 if __name__ == "__main__":
+    from core.auth_manager import auth_manager
+    from PyQt6.QtWidgets import QApplication, QDialog, QPushButton
+    from PyQt6.QtCore import Qt
+    import sys
+
+    # QApplication создаётся СТРОГО ОДИН РАЗ за весь жизненный цикл процесса
     app = QApplication(sys.argv)
-    window = FileSearchApp()
-    window.show()
-    sys.exit(app.exec())
+
+
+    def run_app_loop():
+        try:
+            while True:
+                if not auth_manager.check_stored_session():
+                    login_dlg = LoginDialog()
+                    if login_dlg.exec() != QDialog.DialogCode.Accepted:
+                        sys.exit(0)
+
+                window = FileSearchApp()
+                main_layout = window.centralWidget().layout()
+
+                if main_layout:
+                    btns_layout = QHBoxLayout()
+                    btns_layout.setSpacing(8)
+
+                    if auth_manager.has_role("admin"):
+                        for btn_cls, label in [(UserManagementDialog, "👥 Пользователи"),
+                                               (ACLManagementDialog, "📂 Доступ")]:
+                            btn = QPushButton(label)
+                            btn.setStyleSheet(
+                                "QPushButton { background-color: #f04747; color: white; font-weight: bold; padding: 6px 12px; border-radius: 4px; }")
+                            btn.clicked.connect(lambda checked=False, cls=btn_cls: cls(window).exec())
+                            btns_layout.addWidget(btn)
+
+                    logout_btn = QPushButton("🚪 Выйти")
+                    logout_btn.setStyleSheet(
+                        "QPushButton { background-color: #43b581; color: white; font-weight: bold; padding: 6px 12px; border-radius: 4px; }")
+                    logout_btn.clicked.connect(lambda: (auth_manager.clear_session(), window.close()))
+                    btns_layout.addWidget(logout_btn)
+                    main_layout.addLayout(btns_layout)
+
+                window.show()
+                app.exec()
+        except KeyboardInterrupt:
+            print("\n[App] Завершение работы...")
+            sys.exit(0)
+
+    run_app_loop()
