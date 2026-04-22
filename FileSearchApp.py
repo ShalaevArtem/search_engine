@@ -3,6 +3,7 @@ import sys
 import os
 import pathlib
 import re
+import time
 
 # --- Исправление путей к ресурсам при запуске из .exe (PyInstaller) ---
 if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
@@ -15,6 +16,10 @@ if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
 # --- Импорт библиотек для работы с русским языком ---
 import ru_synonyms
 import pymorphy2_dicts_ru
+
+import logging
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+logger = logging.getLogger(__name__)
 
 import sys
 from pathlib import Path
@@ -53,7 +58,6 @@ class IndexThread(QThread):
             self.finished.emit(success, failed, "Индексация завершена")
         except Exception as e:
             self.finished.emit(0, 0, f"Ошибка: {str(e)}")
-
 
 class LoginDialog(QDialog):
     def __init__(self, parent=None):
@@ -105,7 +109,6 @@ class LoginDialog(QDialog):
         else:
             self.error_label.setText("Неверный логин или пароль")
             self.pass_input.clear()
-
 
 class UserManagementDialog(QDialog):
     def __init__(self, parent=None):
@@ -208,7 +211,6 @@ class UserManagementDialog(QDialog):
         finally:
             db.close()
 
-
 class ACLManagementDialog(QDialog):
     """Диалог управления правилами доступа к файлам/папкам."""
 
@@ -303,6 +305,65 @@ class ACLManagementDialog(QDialog):
             core.access_control._cached_acl = None
         finally:
             db.close()
+
+class FirstRunSetupDialog(QDialog):
+    """Безопасное окно первой настройки"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Первая настройка системы")
+        self.setMinimumSize(420, 210)
+        self.setStyleSheet("QDialog { background-color: #18191c; color: #e0e0e0; }")
+
+        layout = QFormLayout(self)
+        self.user_in = QLineEdit()
+        self.pass_in = QLineEdit()
+        self.pass_in.setEchoMode(QLineEdit.EchoMode.Password)
+        self.btn = QPushButton("Создать администратора")
+        self.error_lbl = QLabel()
+        self.error_lbl.setStyleSheet("color: #ff5555; font-size: 11px;")
+
+        layout.addRow("Логин (≥3 символов):", self.user_in)
+        layout.addRow("Пароль (≥6 символов):", self.pass_in)
+        layout.addRow(self.error_lbl)
+        layout.addRow(self.btn)
+
+        self.btn.clicked.connect(self._save_admin)
+        self.pass_in.returnPressed.connect(self._save_admin)
+
+    def _save_admin(self):
+        u, p = self.user_in.text().strip(), self.pass_in.text()
+        if len(u) < 3 or len(p) < 6:
+            self.error_lbl.setText("Логин ≥3, пароль ≥6 символов")
+            return
+        self.btn.setEnabled(False)
+        self.error_lbl.setText("Создание учётной записи...")
+        QApplication.processEvents()  # Обновляем UI перед тяжёлой операцией
+
+        try:
+            from models.database import SessionLocal, User, Role
+            from core.auth_manager import hash_password
+            db = SessionLocal()
+            try:
+                # Проверка на случай повторного запуска
+                if db.query(User).first():
+                    self.accept()
+                    return
+
+                admin_role = Role(name="admin", description="Полный доступ")
+                user_role = Role(name="user", description="Стандартный доступ")
+                admin_user = User(username=u, password_hash=hash_password(p), is_active=True)
+                admin_user.roles.append(admin_role)
+                db.add_all([admin_role, user_role, admin_user])
+                db.commit()
+                self.accept()
+            finally:
+                db.close()
+        except Exception as e:
+            self.btn.setEnabled(True)
+            self.error_lbl.setText(f"Ошибка: {str(e)[:60]}")
+            import traceback
+            traceback.print_exc()  # Вывод в консоль для отладки
 
 class FileSearchApp(QMainWindow):
     """Главный класс GUI поисковой системы."""
@@ -573,16 +634,21 @@ class FileSearchApp(QMainWindow):
         return user.roles if user and user.roles else []
 
     def display_results(self, results):
-        """Отображает результаты"""
+        """Отображает результаты + защита от Side-Channel (утечки времени)"""
+        start_time = time.time()  # Фиксируем время начала
+
         self.results_table.setRowCount(0)
 
         self.results_table.setColumnCount(4)
-        self.results_table.setHorizontalHeaderLabels(["Путь", "Score", "Дата", "Действие"])
+        self.results_table.setHorizontalHeaderLabels(["Путь", "Релевантность", "Дата", "Действие"])
+        self.results_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.results_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
 
         if not results:
             self.results_table.hide()
             QMessageBox.information(self, "Поиск", "Ничего не найдено или нет прав доступа.")
+            # Имитация задержки
+            time.sleep(0.3)
             return
 
         try:
@@ -597,7 +663,6 @@ class FileSearchApp(QMainWindow):
                 self.results_table.setItem(i, 1, QTableWidgetItem(f"{score:.2f}"))
                 self.results_table.setItem(i, 2, QTableWidgetItem(date))
 
-                # Кнопка предпросмотра
                 btn = QPushButton("👁")
                 btn.setFixedWidth(32)
                 btn.setStyleSheet("QPushButton { background-color: #7289da; color: white; border-radius: 3px; }")
@@ -610,6 +675,12 @@ class FileSearchApp(QMainWindow):
                 self.results_table.setCellWidget(i, 3, btn)
 
             self.results_table.show()
+
+            # Если поиск был слишком быстрым, добавляем задержку до 300мс
+            elapsed = time.time() - start_time
+            if elapsed < 0.3:
+                time.sleep(0.3 - elapsed)
+
         except Exception as e:
             QMessageBox.critical(self, "Ошибка отображения", f"Не удалось показать результаты:\n{e}")
             self.results_table.hide()
@@ -709,7 +780,6 @@ class FileSearchApp(QMainWindow):
                 subprocess.run(["xdg-open", path])
         except Exception as e:
             QMessageBox.warning(self, "Ошибка", f"Не удалось открыть файл:\n{e}")
-
 
 class PreviewDialog(QDialog):
     def __init__(self, file_path: str, highlight_terms: list, parent=None):
@@ -815,50 +885,101 @@ class PreviewDialog(QDialog):
 
 # --- Точка входа в приложение ---
 if __name__ == "__main__":
-    from core.auth_manager import auth_manager
-    from PyQt6.QtWidgets import QApplication, QDialog, QPushButton
-    from PyQt6.QtCore import Qt
     import sys
+    from PyQt6.QtWidgets import QApplication, QDialog, QPushButton, QHBoxLayout
+    from PyQt6.QtCore import QTimer
+    from models.database import init_db, DB_PATH, engine
+    from core.auth_manager import auth_manager
+    import logging
 
-    # QApplication создаётся СТРОГО ОДИН РАЗ за весь жизненный цикл процесса
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    logger = logging.getLogger(__name__)
+
     app = QApplication(sys.argv)
+    # Держим процесс активным между переключениями окон
+    app.setQuitOnLastWindowClosed(False)
 
+    # Инициализация базы данных
+    is_ready = init_db()
+    if not is_ready and DB_PATH.exists():
+        logger.warning("База данных существует, но пуста или повреждена. Пересоздаём...")
+        engine.dispose()
+        import time
 
-    def run_app_loop():
+        time.sleep(0.15)
         try:
-            while True:
-                if not auth_manager.check_stored_session():
-                    login_dlg = LoginDialog()
-                    if login_dlg.exec() != QDialog.DialogCode.Accepted:
-                        sys.exit(0)
+            DB_PATH.unlink(missing_ok=True)
+            for ext in ('-wal', '-shm'):
+                p = DB_PATH.with_suffix(f'.db{ext}')
+                if p.exists():
+                    p.unlink()
+        except PermissionError as e:
+            logger.error(f"Не удалось удалить базу данных: {e}. Закройте IDE и удалите файл вручную.")
+            sys.exit(1)
+        is_ready = init_db()
 
-                window = FileSearchApp()
-                main_layout = window.centralWidget().layout()
-
-                if main_layout:
-                    btns_layout = QHBoxLayout()
-                    btns_layout.setSpacing(8)
-
-                    if auth_manager.has_role("admin"):
-                        for btn_cls, label in [(UserManagementDialog, "👥 Пользователи"),
-                                               (ACLManagementDialog, "📂 Доступ")]:
-                            btn = QPushButton(label)
-                            btn.setStyleSheet(
-                                "QPushButton { background-color: #f04747; color: white; font-weight: bold; padding: 6px 12px; border-radius: 4px; }")
-                            btn.clicked.connect(lambda checked=False, cls=btn_cls: cls(window).exec())
-                            btns_layout.addWidget(btn)
-
-                    logout_btn = QPushButton("🚪 Выйти")
-                    logout_btn.setStyleSheet(
-                        "QPushButton { background-color: #43b581; color: white; font-weight: bold; padding: 6px 12px; border-radius: 4px; }")
-                    logout_btn.clicked.connect(lambda: (auth_manager.clear_session(), window.close()))
-                    btns_layout.addWidget(logout_btn)
-                    main_layout.addLayout(btns_layout)
-
-                window.show()
-                app.exec()
-        except KeyboardInterrupt:
-            print("\n[App] Завершение работы...")
+    if not is_ready:
+        setup_dlg = FirstRunSetupDialog()
+        if setup_dlg.exec() != QDialog.DialogCode.Accepted:
             sys.exit(0)
 
-    run_app_loop()
+    # Глобальная ссылка предотвращает удаление окна сборщиком мусора PyQt
+    active_window = None
+
+    def show_login():
+        global active_window
+        if auth_manager.check_stored_session():
+            show_main_window()
+            return
+
+        active_window = LoginDialog()
+        # Закрытие крестиком в окне входа завершает процесс
+        active_window.rejected.connect(app.quit)
+        # Успешный вход открывает главное окно
+        active_window.accepted.connect(show_main_window)
+        active_window.show()
+
+    def show_main_window():
+        global active_window
+        active_window = FileSearchApp()
+
+        # Перехват события закрытия для различения крестика и кнопки выхода
+        def handle_close_event(event):
+            if event.spontaneous():
+                # Пользователь нажал системный крестик
+                app.quit()
+            event.accept()
+
+        active_window.closeEvent = handle_close_event
+
+        main_layout = active_window.centralWidget().layout()
+        if main_layout:
+            btns_layout = QHBoxLayout()
+            btns_layout.setSpacing(8)
+
+            if auth_manager.has_role("admin"):
+                for btn_cls, label in [(UserManagementDialog, "Пользователи"), (ACLManagementDialog, "Доступ")]:
+                    btn = QPushButton(label)
+                    btn.setStyleSheet(
+                        "QPushButton { background-color: #f04747; color: white; font-weight: bold; padding: 6px 12px; border-radius: 4px; }")
+                    btn.clicked.connect(lambda checked=False, cls=btn_cls: cls(active_window).exec())
+                    btns_layout.addWidget(btn)
+
+            logout_btn = QPushButton("Выйти")
+            logout_btn.setStyleSheet(
+                "QPushButton { background-color: #43b581; color: white; font-weight: bold; padding: 6px 12px; border-radius: 4px; }")
+
+            def on_logout():
+                auth_manager.clear_session()
+                active_window.close()
+                # Небольшая задержка позволяет окну полностью закрыться перед показом нового
+                QTimer.singleShot(100, show_login)
+
+            logout_btn.clicked.connect(on_logout)
+            btns_layout.addWidget(logout_btn)
+            main_layout.addLayout(btns_layout)
+
+        active_window.show()
+
+    show_login()
+    sys.exit(app.exec())
