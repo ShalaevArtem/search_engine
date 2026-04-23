@@ -9,6 +9,8 @@ class Config:
     BASE_DIR = Path(__file__).parent
     # Директория для хранения индекса Whoosh
     INDEX_DIR = BASE_DIR / "indexdir"
+    # Локальная папка для NLTK данных
+    NLTK_DATA_DIR = Path(__file__).parent / "nltk_data"
 
     # --- Поддерживаемые форматы файлов для индексации ---
     SUPPORTED_EXTENSIONS = ('.pdf', '.docx', '.txt')
