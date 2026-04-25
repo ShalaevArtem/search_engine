@@ -4,6 +4,7 @@ from PyQt6.QtWidgets import (
 )
 from models.database import SessionLocal, DocumentACL
 import core.access_control
+from core.access_control import invalidate_acl_cache
 
 class ACLManagementDialog(QDialog):
     """Диалог управления правилами доступа к файлам/папкам."""
@@ -68,6 +69,7 @@ class ACLManagementDialog(QDialog):
                 is_recursive=recursive
             ))
             db.commit()
+            invalidate_acl_cache()
             self.load_rules()
             core.access_control._cached_acl = None
         except IntegrityError:
@@ -91,6 +93,7 @@ class ACLManagementDialog(QDialog):
         try:
             db.query(DocumentACL).filter(DocumentACL.id == rule_id).delete()
             db.commit()
+            invalidate_acl_cache()
             self.load_rules()
             core.access_control._cached_acl = None
         finally:

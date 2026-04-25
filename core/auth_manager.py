@@ -42,6 +42,7 @@ def verify_password(password: str, stored_hash: str) -> bool:
 class AuthManager:
     _instance = None
     _current_user: Optional[CurrentUser] = None
+    _failed_attempts: dict = {}  # username -> (count, last_attempt_time)
 
     def __new__(cls):
         if cls._instance is None:
@@ -49,11 +50,25 @@ class AuthManager:
         return cls._instance
 
     def authenticate(self, username: str, password: str) -> bool:
+        # Блокировка после 5 неудачных попыток на 30 сек
+        now = datetime.now(timezone.utc)
+        if username in self._failed_attempts:
+            count, last = self._failed_attempts[username]
+            if count >= 5 and (now - last).total_seconds() < 30:
+                logger.warning(f"Account {username} temporarily locked")
+                return False
+
         db = SessionLocal()
         try:
             user = db.query(User).filter(User.username == username, User.is_active == True).first()
-            if not user:
+            if not user or not verify_password(password, user.password_hash):
+                # Фиксируем неудачу
+                self._failed_attempts[username] = (
+                    self._failed_attempts.get(username, (0, now))[0] + 1,
+                    now
+                )
                 return False
+            self._failed_attempts.pop(username, None)
             if verify_password(password, user.password_hash):
                 roles = [role.name for role in user.roles]
                 self._current_user = CurrentUser(id=user.id, username=user.username, roles=roles)

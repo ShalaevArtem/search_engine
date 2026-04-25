@@ -7,9 +7,9 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QDate
 from config import Config
-from core.indexer import FileIndexer
+from core.indexer import FileIndexer, logger
 from core.searcher import setup_search_parser, search_index, search_time_range, combined_search, search_by_filename
-from core.access_control import filter_results_by_access, check_file_access
+from core.access_control import check_file_access
 from core.auth_manager import auth_manager
 from ui.threads.index_thread import IndexThread
 from ui.dialogs.preview import PreviewDialog
@@ -231,9 +231,6 @@ class FileSearchApp(QMainWindow):
                 btn.clicked.connect(lambda checked=False, p=path, t=terms: PreviewDialog(p, t, self).exec())
                 self.results_table.setCellWidget(i, 3, btn)
             self.results_table.show()
-            elapsed = time.time() - start_time
-            if elapsed < 0.3:
-                time.sleep(0.3 - elapsed)
         except Exception as e:
             QMessageBox.critical(self, "Ошибка отображения", f"Не удалось показать результаты:\n{e}")
             self.results_table.hide()
@@ -253,11 +250,12 @@ class FileSearchApp(QMainWindow):
 
     def search_date(self):
         try:
+            user_roles = self._get_user_roles()
             start = self.start_date.date().toString("yyyy-MM-dd")
             end = self.end_date.date().toString("yyyy-MM-dd")
             with self.ix.searcher() as searcher:
-                res = search_time_range(searcher, start, end)
-            self.display_results(filter_results_by_access(res, self._get_user_roles()))
+                res = search_time_range(searcher, start, end, user_roles)
+            self.display_results(res)
         except Exception as e:
             QMessageBox.critical(self, "Ошибка поиска", str(e))
 
@@ -267,6 +265,7 @@ class FileSearchApp(QMainWindow):
             QMessageBox.warning(self, "Внимание", "Введите запрос!")
             return
         try:
+            user_roles = self._get_user_roles()
             params = {
                 'query': self.last_query,
                 'start_date': self.combined_start_date.date().toString("yyyy-MM-dd"),
@@ -274,8 +273,8 @@ class FileSearchApp(QMainWindow):
                 'limit': 10
             }
             with self.ix.searcher() as searcher:
-                res = combined_search(searcher, self.parser, params)
-            self.display_results(filter_results_by_access(res, self._get_user_roles()))
+                res = combined_search(searcher, self.parser, params, user_roles)
+            self.display_results(res)
         except Exception as e:
             QMessageBox.critical(self, "Ошибка поиска", str(e))
 
@@ -285,9 +284,10 @@ class FileSearchApp(QMainWindow):
             QMessageBox.warning(self, "Внимание", "Введите имя файла!")
             return
         try:
+            user_roles = self._get_user_roles()
             with self.ix.searcher() as searcher:
-                res = search_by_filename(searcher, self.last_query)
-            self.display_results(filter_results_by_access(res, self._get_user_roles()))
+                res = search_by_filename(searcher, self.last_query, user_roles)
+            self.display_results(res)
         except Exception as e:
             QMessageBox.critical(self, "Ошибка поиска", str(e))
 

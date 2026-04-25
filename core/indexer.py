@@ -146,8 +146,9 @@ class FileIndexer:
                 logger.warning(f"Ошибка обработки {file_path}: {e}")
                 return None
 
-        writer = ix.writer(limitmb=128)
+        writer = None
         try:
+            writer = ix.writer(limitmb=128)
             with ThreadPoolExecutor(max_workers=Config.WORKERS) as executor:
                 futures = {executor.submit(process_file, f): f for f in accessible_files}
                 for future in as_completed(futures):
@@ -165,14 +166,16 @@ class FileIndexer:
             writer.commit()
         except Exception as e:
             logger.error(f"Критическая ошибка: {e}")
-            writer.cancel()
+            if writer:
+                writer.cancel()
             raise
         finally:
             # Гарантированное освобождение ресурсов
-            try:
-                writer.close()
-            except:
-                pass
+            if writer:
+                try:
+                    writer.close()
+                except:
+                    pass
 
         logger.info(f"Индексация завершена. Успешно: {success} | Ошибок: {failed}")
         return success, failed

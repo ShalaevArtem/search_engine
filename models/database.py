@@ -1,3 +1,4 @@
+import logging
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, ForeignKey, Table
 from sqlalchemy import func
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship, configure_mappers
@@ -13,6 +14,8 @@ engine = create_engine(
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+logger = logging.getLogger(__name__)
 
 # Таблица связи многие-ко-многим (user <-> role)
 user_roles = Table(
@@ -58,6 +61,13 @@ def get_db():
 
 configure_mappers()
 
+class DocumentACL(Base):
+    __tablename__ = 'document_acl'
+    id = Column(Integer, primary_key=True, index=True)
+    path_mask = Column(String, unique=True, index=True)
+    allowed_roles = Column(String, nullable=False)
+    is_recursive = Column(Boolean, default=False)
+
 def init_db() -> bool:
     """Создаёт таблицы и дефолтные ACL. Возвращает True, если система уже настроена (есть пользователи)."""
     Base.metadata.create_all(bind=engine)
@@ -81,10 +91,3 @@ def init_db() -> bool:
         return False
     finally:
         db.close()
-
-class DocumentACL(Base):
-    __tablename__ = 'document_acl'
-    id = Column(Integer, primary_key=True, index=True)
-    path_mask = Column(String, unique=True, index=True)
-    allowed_roles = Column(String, nullable=False)
-    is_recursive = Column(Boolean, default=False)

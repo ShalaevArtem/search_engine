@@ -96,11 +96,6 @@ def get_synonyms(word: str) -> List[str]:
         return list(synonyms) if synonyms else [word]
     return [word]
 
-@lru_cache(maxsize=Config.MAX_CACHE_SIZE)
-def get_cache_synonyms(word: str) -> List[str]:
-    """Кэшированный вызов функции получения синонимов."""
-    return get_synonyms(word)
-
 def setup_search_parser(schema):
     """Создаёт и настраивает парсер Whoosh для поиска по содержимому."""
     parser = QueryParser("content", schema, group=OrGroup)
@@ -166,7 +161,7 @@ def search_index(
 
         synonym_queries = []
         for word in words:
-            synonyms = get_cache_synonyms(word)
+            synonyms = get_synonyms(word)
             logger.debug(f"Синонимы для '{word}': {synonyms[:Config.MAX_SYNONYMS]}")
             if synonyms:
                 synonym_queries.append(Or([Term("content", s) for s in synonyms[:Config.MAX_SYNONYMS]]))
@@ -305,7 +300,7 @@ def combined_search(
 
         synonym_queries = []
         for word in words:
-            synonyms = get_cache_synonyms(word)
+            synonyms = get_synonyms(word)
             if synonyms:
                 synonym_queries.append(Or([Term("content", s) for s in synonyms[:Config.MAX_SYNONYMS]]))
 

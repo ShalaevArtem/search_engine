@@ -5,6 +5,10 @@ from models.database import SessionLocal, DocumentACL
 
 logger = logging.getLogger(__name__)
 _cached_acl = None
+def invalidate_acl_cache():
+    """Сбрасывает кэш ACL. Вызывается после любого изменения прав в БД."""
+    global _cached_acl
+    _cached_acl = None
 
 def _normalize_path(p: str) -> str:
     """Приводит путь к единому формату: нижний регистр, обратные слеши, без конечных слешей."""
