@@ -19,7 +19,7 @@ class FileSearchApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Поисковая система")
-        self.setMinimumSize(800, 500)
+        self.setMinimumSize(900, 600)
         Config.INDEX_DIR.mkdir(exist_ok=True)
         self.ix = FileIndexer.get_index(Config.INDEX_DIR)
         if self.ix.is_empty():
@@ -36,7 +36,9 @@ class FileSearchApp(QMainWindow):
         self.progress_bar.hide()
         main_layout.addWidget(self.progress_bar)
         self.tabs = QTabWidget()
-        self.tabs.addTab(self.create_index_tab(), "Индексация")
+        user = auth_manager.get_current_user()
+        if user and "admin" in user.roles:
+            self.tabs.addTab(self.create_index_tab(), "Индексирование")
         self.tabs.addTab(self.create_keywords_tab(), "Ключевые слова")
         self.tabs.addTab(self.create_date_tab(), "Дата")
         self.tabs.addTab(self.create_combined_tab(), "Комбинированный")
@@ -53,25 +55,120 @@ class FileSearchApp(QMainWindow):
         main_layout.addWidget(self.results_table)
         self.results_table.cellDoubleClicked.connect(self.open_file_from_result)
         self.setCentralWidget(central_widget)
-        self.setStyleSheet(self.dark_stylesheet())
+        self.setStyleSheet(self.system_stylesheet())
         self.index_thread = None
         self.last_query = ""
 
-    def dark_stylesheet(self):
+    def system_stylesheet(self):
         return """
-        QMainWindow, QWidget { background-color: #18191c; color: #e0e0e0; font-family: 'Segoe UI', 'Arial', sans-serif; font-size: 11px; }
-        QTabWidget::pane { border: 1px solid #23272a; background-color: #23272a; border-radius: 6px; }
-        QTabBar::tab { background-color: #23272a; padding: 4px 10px; margin: 1px; border-top-left-radius: 4px; border-top-right-radius: 4px; font-size: 11px; }
-        QTabBar::tab:selected { background-color: #2c2f33; color: #7289da; border-bottom: 2px solid #7289da; }
-        QLineEdit, QDateEdit { background-color: #2c2f33; border: 1px solid #333; padding: 2px; color: #e0e0e0; border-radius: 3px; font-size: 11px; }
-        QPushButton { background-color: #7289da; color: white; border: none; padding: 4px 10px; font-size: 11px; border-radius: 3px; }
-        QPushButton:hover { background-color: #5f73bc; }
-        QTableWidget { background-color: #23272a; alternate-background-color: #252525; gridline-color: #333; color: #e0e0e0; font-size: 11px; }
-        QTableWidget::item { padding: 1px; }
-        QHeaderView::section { background-color: #2c2f33; padding: 4px; border: 1px solid #333; border-radius: 3px; font-size: 11px; }
-        QProgressBar { border: 1px solid #333; border-radius: 4px; text-align: center; color: #e0e0e0; background-color: #2c2f33; height: 14px; font-size: 11px; }
-        QProgressBar::chunk { background-color: #7289da; border-radius: 4px; }
-        """
+        /* === ОСНОВА === */
+    QMainWindow, QWidget {
+        background-color: #f0f2f5;
+        color: #1f1f1f;
+        font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+        font-size: 13px;
+    }
+    
+    /* === ТАБЫ === */
+    QTabWidget::pane {
+        border: 1px solid #d1d5db;
+        background-color: #ffffff;
+        border-radius: 2px;
+    }
+    QTabBar::tab {
+        background-color: #e4e6eb;
+        padding: 6px 14px;
+        margin: 2px;
+        border-top-left-radius: 2px;
+        border-top-right-radius: 2px;
+        font-size: 13px;
+    }
+    QTabBar::tab:selected {
+        background-color: #ffffff;
+        color: #005a9e;
+        border-bottom: 2px solid #005a9e;
+        font-weight: 500;
+    }
+    QTabBar::tab:hover:!selected {
+        background-color: #d8dadf;
+    }
+    
+    /* === ПОЛЯ ВВОДА === */
+    QLineEdit, QDateEdit {
+        background-color: #ffffff;
+        border: 1px solid #c4c4c4;
+        padding: 4px 8px;
+        color: #1f1f1f;
+        border-radius: 2px;
+        font-size: 13px;
+    }
+    QLineEdit:focus, QDateEdit:focus {
+        border: 1px solid #005a9e;
+    }
+    
+    /* === КНОПКИ === */
+    QPushButton {
+        background-color: #005a9e;
+        color: white;
+        border: none;
+        padding: 5px 14px;
+        font-size: 13px;
+        border-radius: 2px;
+        min-height: 28px;
+    }
+    QPushButton:hover {
+        background-color: #004578;
+    }
+    QPushButton:pressed {
+        background-color: #00365e;
+    }
+    QPushButton:disabled {
+        background-color: #c4c4c4;
+        color: #666666;
+    }
+    
+    /* === ТАБЛИЦА === */
+    QTableWidget {
+        background-color: #ffffff;
+        alternate-background-color: #f7f8fa;
+        gridline-color: #e4e6eb;
+        color: #1f1f1f;
+        font-size: 13px;
+        border: 1px solid #d1d5db;
+    }
+    QTableWidget::item {
+        padding: 4px;
+        border-bottom: 1px solid #e4e6eb;
+    }
+    QHeaderView::section {
+        background-color: #f0f2f5;
+        padding: 6px;
+        border: 1px solid #d1d5db;
+        font-weight: 600;
+        font-size: 13px;
+    }
+    
+    /* === ПРОГРЕСС === */
+    QProgressBar {
+        border: 1px solid #d1d5db;
+        border-radius: 2px;
+        text-align: center;
+        color: #1f1f1f;
+        background-color: #ffffff;
+        height: 18px;
+        font-size: 12px;
+    }
+    QProgressBar::chunk {
+        background-color: #005a9e;
+        border-radius: 1px;
+    }
+    
+    /* === МЕТКИ === */
+    QLabel {
+        color: #1f1f1f;
+        font-size: 13px;
+    }
+    """
 
     def create_index_tab(self):
         tab = QWidget()
@@ -166,6 +263,10 @@ class FileSearchApp(QMainWindow):
             self.dir_input.setText(directory)
 
     def start_indexing(self):
+        user = auth_manager.get_current_user()
+        if not user or "admin" not in user.roles:
+            QMessageBox.critical(self, "Отказ в доступе", "Индексирование доступно только администраторам.")
+            return
         directory = self.dir_input.text()
         if not directory:
             QMessageBox.warning(self, "Внимание", "Укажите путь к директории!")

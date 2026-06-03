@@ -148,7 +148,7 @@ class FileIndexer:
 
         writer = None
         try:
-            writer = ix.writer(limitmb=128)
+            writer = ix.writer(limitmb=512)
             with ThreadPoolExecutor(max_workers=Config.WORKERS) as executor:
                 futures = {executor.submit(process_file, f): f for f in accessible_files}
                 for future in as_completed(futures):

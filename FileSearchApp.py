@@ -31,7 +31,7 @@ if __name__ == "__main__":
                 if p.exists():
                     p.unlink()
         except PermissionError as e:
-            logger.error(f"Не удалось удалить базу данных: {e}. Закройте IDE и удалите файл вручную.")
+            logger.error(f"Не удалось удалить базу данных: {e}.")
             sys.exit(1)
         is_ready = init_db()
 

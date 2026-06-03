@@ -26,6 +26,9 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+*.spec
+*.bak
+*.txt
 
 .vscode/
 .idea/
