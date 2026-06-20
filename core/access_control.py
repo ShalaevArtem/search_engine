@@ -28,11 +28,9 @@ def _load_acl_rules():
             is_recursive = getattr(rule, "is_recursive", False)
             roles = [r.strip() for r in rule.allowed_roles.split(",") if r.strip()]
 
-            # Для рекурсивных правил убираем wildcard, оставляем только базовую директорию
             base_mask = raw_mask.replace("*", "").replace("?", "")
             base_mask = _normalize_path(base_mask)
 
-            # Для точных масок сохраняем wildcard
             full_mask = _normalize_path(raw_mask)
 
             processed.append({
@@ -73,7 +71,6 @@ def check_file_access(file_path: str, roles: list[str]) -> bool:
             if norm_file == rule["base_dir"]:
                 return True
         else:
-            # Точное совпадение по маске (поддерживает * и ?)
             if fnmatch.fnmatch(norm_file, rule["full_mask"]):
                 return True
     return False
@@ -87,7 +84,7 @@ def filter_results_by_access(results: list, roles: list[str]) -> list:
 def get_allowed_roles_for_path(file_path: str) -> list[str]:
     """
     Возвращает список ролей, которые имеют доступ к файлу.
-    Используется при индексации для записи поля 'roles' в индекс.
+    Используется при индексировании для записи поля 'roles' в индекс.
     """
     try:
         norm_file = _normalize_path(file_path)

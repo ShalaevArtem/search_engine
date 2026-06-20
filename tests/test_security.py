@@ -4,7 +4,6 @@ from whoosh import index
 from core.searcher import setup_search_parser, search_index, search_time_range, search_by_filename
 from models.schemas import search_schema
 
-
 @pytest.fixture
 def temp_index(tmp_path):
     """Создаёт временный индекс с 2 документами: один для admin, один для user+admin."""
@@ -14,7 +13,6 @@ def temp_index(tmp_path):
 
     writer = ix.writer()
 
-    # Документ ТОЛЬКО для admin
     writer.add_document(
         path=str(tmp_path / "admin_secret.txt"),
         filename="admin_secret.txt",
@@ -23,7 +21,6 @@ def temp_index(tmp_path):
         roles="admin"
     )
 
-    # Документ для user и admin
     writer.add_document(
         path=str(tmp_path / "user_public.txt"),
         filename="user_public.txt",
@@ -35,7 +32,6 @@ def temp_index(tmp_path):
     writer.commit()
     return ix
 
-
 def test_user_cannot_find_admin_document_by_keywords(temp_index):
     """User видит только свои документы при поиске по ключевым словам."""
     parser = setup_search_parser(temp_index.schema)
@@ -43,7 +39,6 @@ def test_user_cannot_find_admin_document_by_keywords(temp_index):
         results = search_index(searcher, parser, "отчёт", user_roles=["user"])
         assert len(results) == 1
         assert results[0]["path"].endswith("user_public.txt")
-
 
 def test_user_cannot_find_admin_document_by_date(temp_index):
     """User видит только свои документы при поиске по дате."""
@@ -53,13 +48,11 @@ def test_user_cannot_find_admin_document_by_date(temp_index):
         assert len(results) == 1
         assert results[0]["path"].endswith("user_public.txt")
 
-
 def test_user_cannot_find_admin_document_by_filename(temp_index):
     """User не находит файл admin при поиске по имени."""
     with temp_index.searcher() as searcher:
         results = search_by_filename(searcher, "admin_secret", user_roles=["user"])
         assert len(results) == 0
-
 
 def test_admin_can_find_all_documents(temp_index):
     """Admin видит все документы."""
@@ -67,3 +60,10 @@ def test_admin_can_find_all_documents(temp_index):
     with temp_index.searcher() as searcher:
         results = search_index(searcher, parser, "отчёт", user_roles=["admin"])
         assert len(results) == 2
+
+def test_user_can_find_by_filename_own_document(temp_index):
+    """User находит свой файл по имени."""
+    with temp_index.searcher() as searcher:
+        results = search_by_filename(searcher, "user_public", user_roles=["user"])
+        assert len(results) == 1
+        assert results[0]["path"].endswith("user_public.txt")

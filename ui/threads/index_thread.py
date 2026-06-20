@@ -16,6 +16,7 @@ class IndexThread(QThread):
             self.progress.emit(value)
         try:
             success, failed = FileIndexer.index_files(self.directory, self.user_roles, progress_callback)
-            self.finished.emit(success, failed, "Индексация завершена")
+            self.finished.emit(success, failed, "Индексирование завершено")
         except Exception as e:
             self.finished.emit(0, 0, f"Ошибка: {str(e)}")
+

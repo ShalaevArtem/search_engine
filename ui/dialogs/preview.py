@@ -1,4 +1,6 @@
-import os, re, sys
+import os
+import re
+import sys
 from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTextBrowser
 from PyQt6.QtCore import Qt
 
@@ -6,8 +8,9 @@ class PreviewDialog(QDialog):
     def __init__(self, file_path: str, highlight_terms: list, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"Предпросмотр: {os.path.basename(file_path)}")
-        self.setMinimumSize(700, 500)
-        self.setStyleSheet("QDialog { background-color: #18191c; color: #e0e0e0; }")
+        self.setMinimumSize(800, 600)
+        self._apply_dark_theme()
+
         self.terms = []
         if isinstance(highlight_terms, list):
             for t in highlight_terms:
@@ -20,15 +23,20 @@ class PreviewDialog(QDialog):
                     self.terms.append(t)
         if not self.terms and hasattr(parent, 'last_query') and parent.last_query:
             self.terms = [parent.last_query]
+
         layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 16)
+
         terms_str = ", ".join(self.terms[:5]) if self.terms else "поиск по дате/имени"
         info = QLabel(f"Совпавшие термы: <b>{terms_str}</b>")
         info.setWordWrap(True)
         layout.addWidget(info)
+
         self.browser = QTextBrowser()
         self.browser.setReadOnly(True)
-        self.browser.setStyleSheet("QTextBrowser { background-color: #23272a; color: #e0e0e0; font-size: 13px; padding: 8px; }")
         layout.addWidget(self.browser)
+
         btns = QHBoxLayout()
         btn_open = QPushButton("Открыть в системе")
         btn_close = QPushButton("Закрыть")
@@ -38,7 +46,43 @@ class PreviewDialog(QDialog):
         btns.addStretch()
         btns.addWidget(btn_close)
         layout.addLayout(btns)
+
         self.load_and_highlight(file_path)
+
+    def _apply_dark_theme(self):
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1E1E1E;
+                color: #D4D4D4;
+            }
+            QLabel {
+                color: #D4D4D4;
+                font-size: 13px;
+            }
+            QTextBrowser {
+                background-color: #252526;
+                color: #D4D4D4;
+                border: 1px solid #3E3E42;
+                border-radius: 4px;
+                font-size: 13px;
+                padding: 8px;
+            }
+            QPushButton {
+                background-color: #0E639C;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-size: 13px;
+                min-height: 32px;
+            }
+            QPushButton:hover {
+                background-color: #1177BB;
+            }
+            QPushButton:pressed {
+                background-color: #094771;
+            }
+        """)
 
     def load_and_highlight(self, path: str):
         try:
@@ -67,7 +111,7 @@ class PreviewDialog(QDialog):
                     if len(text) > MAX_CHARS:
                         break
             if not text.strip():
-                self.browser.setHtml("<h3>Текст не извлечён</h3>")
+                self.browser.setHtml("<h3 style='color:#D4D4D4'>Текст не извлечён</h3>")
                 return
             if not self.terms:
                 self.browser.setPlainText(text[:MAX_CHARS])
@@ -79,13 +123,15 @@ class PreviewDialog(QDialog):
             pattern = re.compile('|'.join(safe_terms[:10]), re.IGNORECASE)
             safe_text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             highlighted = pattern.sub(
-                lambda m: f"<mark style='background:#f1c40f; color:#000; padding:2px 4px; border-radius:3px;'>{m.group(0)}</mark>",
+                lambda
+                    m: f"<mark style='background:#FFD700; color:#000; padding:2px 4px; border-radius:3px;'>{m.group(0)}</mark>",
                 safe_text
             )
-            self.browser.setHtml(f"<div style='font-family:Consolas, monospace; line-height:1.5;'>{highlighted}</div>")
+            self.browser.setHtml(
+                f"<div style='font-family:Consolas, monospace; line-height:1.5; color:#D4D4D4;'>{highlighted}</div>")
         except Exception as e:
             import traceback
             self.browser.setHtml(f"""
-                <h3 style='color:#f04747'>Ошибка предпросмотра</h3>
-                <pre style='background:#2c2f33; padding:8px; border-radius:4px; white-space:pre-wrap;'>{traceback.format_exc()[:500]}</pre>
+                <h3 style='color:#F85149'>Ошибка предпросмотра</h3>
+                <pre style='background:#252526; color:#D4D4D4; padding:8px; border-radius:4px; white-space:pre-wrap;'>{traceback.format_exc()[:500]}</pre>
             """)

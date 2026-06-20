@@ -1,3 +1,4 @@
+import time as time_module
 import logging
 import re
 import string
@@ -13,28 +14,19 @@ from razdel import tokenize
 from whoosh.qparser import QueryParser, FuzzyTermPlugin, OrGroup
 from whoosh.query import Term, And, Or, DateRange, FuzzyTerm, Prefix
 from whoosh.searching import Searcher
-from whoosh import index
-
 from config import Config
-from models.schemas import SearchResult
 
-# Настройка логирования
 logger = logging.getLogger(__name__)
 
-# Инициализация инструментов для русского языка
 morph = pymorphy3.MorphAnalyzer()
 sg = SynonymsGraph()
 
-# Локальная папка для NLTK данных
 nltk_data_dir = Config.NLTK_DATA_DIR
 if nltk_data_dir and nltk_data_dir.exists() and str(nltk_data_dir) not in nltk.data.path:
     nltk.data.path.append(str(nltk_data_dir))
 
 def _format_search_result(hit: Any) -> Dict[str, Any]:
-    """
-    Безопасно форматирует результат Whoosh в словарь для UI.
-    Устраняет дублирование кода и корректно обрабатывает matched_terms.
-    """
+    """Безопасно форматирует результат Whoosh в словарь для UI."""
     matched_terms = []
     try:
         raw_terms = hit.matched_terms()
@@ -118,7 +110,6 @@ def tokenize_text(text: str, lang: str) -> List[str]:
         return tokenize_en(text)
     return text.lower().split()
 
-
 def search_index(
         searcher: Searcher,
         parser: QueryParser,
@@ -128,6 +119,8 @@ def search_index(
         stop_words: Optional[set] = None
 ) -> List[Dict[str, Any]]:
     """Поиск по ключевым словам с расширением через синонимы и фильтрацией по ролям."""
+    t_start = time_module.perf_counter()
+
     if stop_words is None:
         stop_words = set()
     if not user_roles:
@@ -135,7 +128,6 @@ def search_index(
 
     logger.info(f"Поиск: '{query_str}' | Роли: {user_roles}")
 
-    # 1. Прямой поиск
     try:
         query = parser.parse(query_str)
 
@@ -148,11 +140,12 @@ def search_index(
         results = searcher.search(final_query, limit=limit, terms=True)
         if results:
             logger.info(f"Прямой поиск: найдено {len(results)} документов")
+            elapsed = time_module.perf_counter() - t_start
+            logger.info(f"Поиск выполнен за {elapsed:.4f} сек")
             return [_format_search_result(hit) for hit in results]
     except Exception as e:
         logger.error(f"Ошибка при прямом поиске: {e}")
 
-    # 2. Поиск с расширением (синонимы + бустинг) + ФИЛЬТР ПО РОЛЯМ
     try:
         lang = detect_language(query_str)
         tokens = tokenize_text(query_str, lang)
@@ -184,6 +177,8 @@ def search_index(
             results = searcher.search(final_query, limit=limit, terms=True)
             if results:
                 logger.info(f"Поиск с расширением: найдено {len(results)} документов")
+                elapsed = time_module.perf_counter() - t_start
+                logger.info(f"Поиск выполнен за {elapsed:.4f} сек")
                 return [_format_search_result(hit) for hit in results]
 
         logger.info("Ничего не найдено")
@@ -200,6 +195,8 @@ def search_time_range(
         limit: int = 10
 ) -> List[Dict[str, Any]]:
     """Поиск документов по временному диапазону с фильтрацией по ролям."""
+    t_start = time_module.perf_counter()
+
     if not user_roles:
         return []
 
@@ -241,6 +238,8 @@ def search_time_range(
             final_query = date_query
 
         results = searcher.search(final_query, limit=limit)
+        elapsed = time_module.perf_counter() - t_start
+        logger.info(f"Поиск выполнен за {elapsed:.4f} сек")
         return [_format_search_result(hit) for hit in results]
 
     except ValueError as e:
@@ -250,7 +249,6 @@ def search_time_range(
         logger.error(f"Ошибка поиска по дате: {e}")
         return []
 
-
 def combined_search(
         searcher: Searcher,
         parser: QueryParser,
@@ -259,6 +257,8 @@ def combined_search(
         stop_words: Optional[set] = None
 ) -> List[Dict[str, Any]]:
     """Комбинированный поиск: текст + диапазон дат + фильтрация по ролям."""
+    t_start = time_module.perf_counter()
+
     if stop_words is None:
         stop_words = set()
     if not user_roles:
@@ -280,7 +280,6 @@ def combined_search(
             datetime.combine(end_dt, time.max)
         )
 
-        # Прямой поиск + дата + роли
         original_query = parser.parse(query_str)
         direct_query = And([original_query, date_query])
 
@@ -291,9 +290,10 @@ def combined_search(
         results = searcher.search(direct_query, limit=limit, terms=True)
         if results:
             logger.info(f"Прямой комбо: найдено {len(results)} документов")
+            elapsed = time_module.perf_counter() - t_start
+            logger.info(f"Поиск выполнен за {elapsed:.4f} сек")
             return [_format_search_result(hit) for hit in results]
 
-        # Поиск с синонимами + дата + роли
         lang = detect_language(query_str)
         tokens = tokenize_text(query_str, lang)
         words = [w.lower() for w in tokens if w not in stop_words and w not in string.punctuation]
@@ -321,6 +321,8 @@ def combined_search(
             results = searcher.search(combined_query, limit=limit, terms=True)
             if results:
                 logger.info(f"Комбо по синонимам: найдено {len(results)} документов")
+                elapsed = time_module.perf_counter() - t_start
+                logger.info(f"Поиск выполнен за {elapsed:.4f} сек")
                 return [_format_search_result(hit) for hit in results]
 
         logger.info("Комбо-поиск не дал результатов")
@@ -330,23 +332,25 @@ def combined_search(
         logger.error(f"Ошибка в combined_search: {e}")
         return []
 
-
 def search_by_filename(
         searcher: Searcher,
         filename: str,
         user_roles: list[str],
         limit: int = 10
 ) -> List[Dict[str, Any]]:
-    """Оптимизированный поиск по имени файла с фильтрацией по ролям."""
+    """Поиск по имени файла с фильтрацией по ролям."""
     if not filename or not filename.strip() or not user_roles:
         return []
 
     query_str = filename.strip().lower()
 
     try:
-        q1 = Prefix("filename", query_str).boost(2.0)
-        q2 = Term("filename", query_str).boost(3.0)
-        q3 = FuzzyTerm("filename", query_str, maxdist=1).boost(0.5)
+        q1 = Prefix("filename", query_str)
+        q1.boost = 2.0
+        q2 = Term("filename", query_str)
+        q2.boost = 3.0
+        q3 = FuzzyTerm("filename", query_str, maxdist=1)
+        q3.boost = 0.5
 
         query = Or([q1, q2, q3])
 

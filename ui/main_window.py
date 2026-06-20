@@ -1,299 +1,677 @@
-import sys, os, time
+import sys
+import os
+import time
+import logging
 from pathlib import Path
+
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QDateEdit, QTableWidget, QTableWidgetItem,
-    QFileDialog, QMessageBox, QHeaderView, QProgressBar
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QLineEdit, QPushButton, QDateEdit, QCheckBox,
+    QRadioButton, QButtonGroup, QTableWidget, QTableWidgetItem,
+    QHeaderView, QProgressBar, QFrame, QStackedWidget, QMessageBox,
+    QFileDialog, QStatusBar
 )
 from PyQt6.QtCore import Qt, QDate
+from PyQt6.QtGui import QFont
+
 from config import Config
-from core.indexer import FileIndexer, logger
-from core.searcher import setup_search_parser, search_index, search_time_range, combined_search, search_by_filename
+from core.indexer import FileIndexer
+from core.searcher import (
+    setup_search_parser, search_index, search_time_range,
+    combined_search, search_by_filename
+)
 from core.access_control import check_file_access
 from core.auth_manager import auth_manager
 from ui.threads.index_thread import IndexThread
 from ui.dialogs.preview import PreviewDialog
 
+logger = logging.getLogger(__name__)
+
 class FileSearchApp(QMainWindow):
-    """Главный класс GUI поисковой системы."""
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Поисковая система")
-        self.setMinimumSize(900, 600)
+        self.setMinimumSize(1200, 700)
+
+        font = QFont("Segoe UI", 10)
+        self.setFont(font)
+
         Config.INDEX_DIR.mkdir(exist_ok=True)
         self.ix = FileIndexer.get_index(Config.INDEX_DIR)
         if self.ix.is_empty():
-            print("Индекс пуст. Выполните индексацию.")
+            logger.info("Индекс пуст. Выполните индексирование.")
         self.parser = setup_search_parser(self.ix.schema)
-        central_widget = QWidget()
-        main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(8, 6, 8, 6)
-        main_layout.setSpacing(6)
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setTextVisible(True)
-        self.progress_bar.hide()
-        main_layout.addWidget(self.progress_bar)
-        self.tabs = QTabWidget()
-        user = auth_manager.get_current_user()
-        if user and "admin" in user.roles:
-            self.tabs.addTab(self.create_index_tab(), "Индексирование")
-        self.tabs.addTab(self.create_keywords_tab(), "Ключевые слова")
-        self.tabs.addTab(self.create_date_tab(), "Дата")
-        self.tabs.addTab(self.create_combined_tab(), "Комбинированный")
-        self.tabs.addTab(self.create_filename_tab(), "Имя файла")
-        main_layout.addWidget(self.tabs)
-        self.results_table = QTableWidget(0, 4)
-        self.results_table.setHorizontalHeaderLabels(["Путь", "Релевантность", "Дата", "Действие"])
-        self.results_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.results_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        self.results_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.results_table.setAlternatingRowColors(True)
-        self.results_table.setStyleSheet("font-size: 11px; padding: 2px;")
-        self.results_table.hide()
-        main_layout.addWidget(self.results_table)
-        self.results_table.cellDoubleClicked.connect(self.open_file_from_result)
-        self.setCentralWidget(central_widget)
-        self.setStyleSheet(self.system_stylesheet())
+
+        central = QWidget()
+        self.setCentralWidget(central)
+
+        main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        main_layout.addWidget(self._create_user_panel())
+        main_layout.addWidget(self._create_search_panel())
+
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setTextVisible(True)
+        self._progress_bar.hide()
+        main_layout.addWidget(self._progress_bar)
+
+        self._results_stack = QStackedWidget()
+        self._results_stack.addWidget(self._create_empty_state())
+        self._results_stack.addWidget(self._create_results_table())
+        self._results_stack.setCurrentIndex(0)
+        main_layout.addWidget(self._results_stack, 1)
+
+        self._status_bar = QStatusBar()
+        self._status_bar.setFixedHeight(24)
+        self._status_bar.showMessage("Готово")
+        main_layout.addWidget(self._status_bar)
+
+        self.setStyleSheet(self._system_stylesheet())
+
         self.index_thread = None
-        self.last_query = ""
 
-    def system_stylesheet(self):
+        if self.ix.is_empty():
+            self._status_bar.showMessage("Индекс пуст. Обратитесь к администратору для индексирования.")
+
+        self._on_logout_callback = None
+
+    def _create_user_panel(self) -> QFrame:
+        panel = QFrame()
+        panel.setFixedHeight(40)
+        panel.setStyleSheet("""
+            QFrame {
+                background-color: #252526;
+                border-bottom: 1px solid #3E3E42;
+            }
+            QLabel {
+                color: #D4D4D4;
+                font-size: 12px;
+            }
+            QPushButton {
+                border: none;
+                background: transparent;
+                color: #9CDCFE;
+                font-size: 12px;
+                padding: 4px 8px;
+            }
+            QPushButton:hover {
+                color: #4FC1FF;
+                text-decoration: underline;
+            }
+        """)
+
+        layout = QHBoxLayout(panel)
+        layout.setContentsMargins(16, 0, 16, 0)
+        layout.setSpacing(8)
+
+        user = auth_manager.get_current_user()
+        username = user.username if user else "?"
+        self._user_label = QLabel(f"Вы вошли как: <b>{username}</b>")
+        layout.addWidget(self._user_label)
+        layout.addStretch()
+
+        if user and "admin" in user.roles:
+            for label, callback in [
+                ("Индексирование", self._show_index_dialog),
+                ("Пользователи", self._show_users_dialog),
+                ("Доступ", self._show_acl_dialog),
+            ]:
+                btn = QPushButton(label)
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn.clicked.connect(callback)
+                layout.addWidget(btn)
+
+            sep = QLabel("|")
+            sep.setStyleSheet("color: #D1D5DB;")
+            layout.addWidget(sep)
+
+        logout_btn = QPushButton("Выйти")
+        logout_btn.setStyleSheet("""
+            QPushButton {
+                border: none;
+                background: transparent;
+                color: #6B7280;
+                font-size: 12px;
+                padding: 4px 8px;
+            }
+            QPushButton:hover {
+                color: #DC2626;
+                text-decoration: underline;
+            }
+        """)
+        logout_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        logout_btn.clicked.connect(self._do_logout)
+        layout.addWidget(logout_btn)
+
+        return panel
+
+    def _create_search_panel(self) -> QFrame:
+        card = QFrame()
+        card.setStyleSheet("""
+            QFrame {
+                background-color: #252526;
+                border: 1px solid #3E3E42;
+                border-radius: 6px;
+            }
+            QLabel {
+                color: #D4D4D4;
+                font-size: 12px;
+            }
+            QLineEdit {
+                background-color: #3C3C3C;
+                border: 1px solid #3E3E42;
+                border-radius: 4px;
+                padding: 4px 8px;
+                color: #D4D4D4;
+                font-size: 13px;
+                min-height: 28px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #0E639C;
+            }
+            QPushButton#primary {
+                background-color: #0E639C;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 6px 16px;
+                font-size: 13px;
+                min-height: 32px;
+            }
+            QPushButton#primary:hover {
+                background-color: #1177BB;
+            }
+            QPushButton#primary:pressed {
+                background-color: #094771;
+            }
+            QPushButton#secondary {
+                background-color: #3C3C3C;
+                color: #D4D4D4;
+                border: 1px solid #3E3E42;
+                border-radius: 4px;
+                padding: 6px 12px;
+                font-size: 13px;
+                min-height: 32px;
+            }
+            QPushButton#secondary:enabled:hover {
+                background-color: #4C4C4C;
+            }
+            QPushButton#secondary:disabled {
+                background-color: #2D2D30;
+                color: #6E6E6E;
+            }
+            QRadioButton {
+                color: #D4D4D4;
+                font-size: 12px;
+            }
+            QCheckBox {
+                color: #D4D4D4;
+                font-size: 12px;
+            }
+            QDateEdit {
+                background-color: #3C3C3C;
+                border: 1px solid #3E3E42;
+                border-radius: 4px;
+                padding: 4px 8px;
+                color: #D4D4D4;
+                font-size: 12px;
+                min-height: 28px;
+            }
+            QDateEdit:disabled {
+                background-color: #2D2D30;
+                color: #6E6E6E;
+            }
+            QDateEdit::drop-down {
+                border-left: 1px solid #3E3E42;
+                width: 24px;
+            }
+            QCalendarWidget {
+                background-color: #252526;
+            }
+            QCalendarWidget QTableView {
+                background-color: #252526;
+                color: #D4D4D4;
+                selection-background-color: #0E639C;
+                selection-color: #FFFFFF;
+                gridline-color: #3E3E42;
+            }
+            QCalendarWidget QTableView::item {
+                color: #D4D4D4;
+                padding: 4px;
+            }
+            QCalendarWidget QTableView::item:selected {
+                background-color: #0E639C;
+                color: #FFFFFF;
+            }
+            QCalendarWidget QWidget#qt_calendar_navigationbar {
+                background-color: #2D2D30;
+            }
+            QCalendarWidget QToolButton {
+                color: #D4D4D4;
+                background-color: transparent;
+                font-size: 13px;
+                padding: 4px;
+            }
+            QCalendarWidget QSpinBox {
+                color: #D4D4D4;
+                background-color: #3C3C3C;
+                border: 1px solid #3E3E42;
+                padding: 2px;
+            }
+            QCalendarWidget QSpinBox::up-button, QCalendarWidget QSpinBox::down-button {
+                background-color: #3E3E42;
+                border: 1px solid #3E3E42;
+            }
+            QCalendarWidget QSpinBox::up-button:hover, QCalendarWidget QSpinBox::down-button:hover {
+                background-color: #4C4C4C;
+            }
+            QCalendarWidget QTableView::item:disabled {
+                color: #F85149;
+            }
+        """)
+
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(0)
+
+        row1 = QHBoxLayout()
+        row1.setSpacing(8)
+
+        query_label = QLabel("Запрос:")
+        query_label.setFixedWidth(52)
+        query_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        row1.addWidget(query_label)
+
+        self._query_input = QLineEdit()
+        self._query_input.setPlaceholderText("Например: отчёт по проекту")
+        self._query_input.setMinimumWidth(300)
+        row1.addWidget(self._query_input, 1)
+
+        self._search_btn = QPushButton("Поиск")
+        self._search_btn.setObjectName("primary")
+        self._search_btn.setFixedWidth(100)
+        self._search_btn.clicked.connect(self.do_search)
+        row1.addWidget(self._search_btn)
+
+        layout.addLayout(row1)
+
+        hint = QLabel("Оставьте поле пустым и включите фильтр по дате, чтобы найти все документы за период")
+        hint.setStyleSheet("color: #9CA3AF; font-size: 11px; margin-top: 4px;")
+        layout.addWidget(hint)
+
+        row2 = QHBoxLayout()
+        row2.setSpacing(16)
+        row2.setContentsMargins(0, 10, 0, 0)
+
+        scope_label = QLabel("Искать:")
+        row2.addWidget(scope_label)
+
+        self._scope_group = QButtonGroup(self)
+        for text, id_ in [("Только в именах файлов", 1), ("Только в содержимом", 2)]:
+            rb = QRadioButton(text)
+            rb.setChecked(id_ == 2)
+            self._scope_group.addButton(rb, id_)
+            row2.addWidget(rb)
+
+        row2.addStretch()
+        layout.addLayout(row2)
+
+        row3 = QHBoxLayout()
+        row3.setSpacing(8)
+        row3.setContentsMargins(0, 8, 0, 0)
+
+        self._date_check = QCheckBox("Ограничить периодом")
+        self._date_check.stateChanged.connect(self._on_date_check_changed)
+        row3.addWidget(self._date_check)
+
+        self._date_from_label = QLabel("С:")
+        self._date_from_label.setEnabled(False)
+        row3.addWidget(self._date_from_label)
+
+        self._date_from = QDateEdit()
+        self._date_from.setCalendarPopup(True)
+        self._date_from.setDate(QDate.currentDate().addDays(-30))
+        self._date_from.setEnabled(False)
+        self._date_from.setMinimumWidth(120)
+        row3.addWidget(self._date_from)
+
+        self._date_to_label = QLabel("По:")
+        self._date_to_label.setEnabled(False)
+        row3.addWidget(self._date_to_label)
+
+        self._date_to = QDateEdit()
+        self._date_to.setCalendarPopup(True)
+        self._date_to.setDate(QDate.currentDate())
+        self._date_to.setEnabled(False)
+        self._date_to.setMinimumWidth(120)
+        row3.addWidget(self._date_to)
+
+        self._date_error = QLabel("Начальная дата позже конечной")
+        self._date_error.setStyleSheet("color: #DC2626; font-size: 11px;")
+        self._date_error.hide()
+        row3.addWidget(self._date_error)
+
+        row3.addStretch()
+        layout.addLayout(row3)
+
+        return card
+
+    def _create_empty_state(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        icon = QLabel("🔍")
+        icon.setStyleSheet("font-size: 48px; color: #D1D5DB;")
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(icon)
+
+        text1 = QLabel("Введите запрос и нажмите «Поиск»")
+        text1.setStyleSheet("font-size: 14px; color: #6B7280; margin-top: 16px;")
+        text1.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(text1)
+
+        text2 = QLabel("Или включите фильтр по дате и нажмите «Показать за период»")
+        text2.setStyleSheet("font-size: 12px; color: #9CA3AF; margin-top: 4px;")
+        text2.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(text2)
+
+        return widget
+
+    def _create_results_table(self) -> QTableWidget:
+        table = QTableWidget(0, 5)
+        table.setHorizontalHeaderLabels(["Имя файла", "Путь", "Дата", "Релевантность", "Предпросмотр"])
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        table.setColumnWidth(1, 400)
+        table.setColumnWidth(4, 80)
+
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setAlternatingRowColors(True)
+        table.setStyleSheet("""
+            QTableWidget {
+                background-color: #252526;
+                alternate-background-color: #2D2D30;
+                gridline-color: #3E3E42;
+                color: #D4D4D4;
+                font-size: 13px;
+                border: 1px solid #3E3E42;
+            }
+            QTableWidget::item {
+                padding: 4px;
+                border-bottom: 1px solid #3E3E42;
+            }
+            QHeaderView::section {
+                background-color: #2D2D30;
+                padding: 6px;
+                border: 1px solid #3E3E42;
+                font-weight: 600;
+                font-size: 12px;
+                color: #D4D4D4;
+            }
+        """)
+
+        table.verticalHeader().setVisible(False)
+        table.setShowGrid(False)
+
+        table.cellDoubleClicked.connect(self.open_file_from_result)
+        return table
+
+    def _system_stylesheet(self) -> str:
         return """
-        /* === ОСНОВА === */
-    QMainWindow, QWidget {
-        background-color: #f0f2f5;
-        color: #1f1f1f;
-        font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
-        font-size: 13px;
-    }
-    
-    /* === ТАБЫ === */
-    QTabWidget::pane {
-        border: 1px solid #d1d5db;
-        background-color: #ffffff;
-        border-radius: 2px;
-    }
-    QTabBar::tab {
-        background-color: #e4e6eb;
-        padding: 6px 14px;
-        margin: 2px;
-        border-top-left-radius: 2px;
-        border-top-right-radius: 2px;
-        font-size: 13px;
-    }
-    QTabBar::tab:selected {
-        background-color: #ffffff;
-        color: #005a9e;
-        border-bottom: 2px solid #005a9e;
-        font-weight: 500;
-    }
-    QTabBar::tab:hover:!selected {
-        background-color: #d8dadf;
-    }
-    
-    /* === ПОЛЯ ВВОДА === */
-    QLineEdit, QDateEdit {
-        background-color: #ffffff;
-        border: 1px solid #c4c4c4;
-        padding: 4px 8px;
-        color: #1f1f1f;
-        border-radius: 2px;
-        font-size: 13px;
-    }
-    QLineEdit:focus, QDateEdit:focus {
-        border: 1px solid #005a9e;
-    }
-    
-    /* === КНОПКИ === */
-    QPushButton {
-        background-color: #005a9e;
-        color: white;
-        border: none;
-        padding: 5px 14px;
-        font-size: 13px;
-        border-radius: 2px;
-        min-height: 28px;
-    }
-    QPushButton:hover {
-        background-color: #004578;
-    }
-    QPushButton:pressed {
-        background-color: #00365e;
-    }
-    QPushButton:disabled {
-        background-color: #c4c4c4;
-        color: #666666;
-    }
-    
-    /* === ТАБЛИЦА === */
-    QTableWidget {
-        background-color: #ffffff;
-        alternate-background-color: #f7f8fa;
-        gridline-color: #e4e6eb;
-        color: #1f1f1f;
-        font-size: 13px;
-        border: 1px solid #d1d5db;
-    }
-    QTableWidget::item {
-        padding: 4px;
-        border-bottom: 1px solid #e4e6eb;
-    }
-    QHeaderView::section {
-        background-color: #f0f2f5;
-        padding: 6px;
-        border: 1px solid #d1d5db;
-        font-weight: 600;
-        font-size: 13px;
-    }
-    
-    /* === ПРОГРЕСС === */
-    QProgressBar {
-        border: 1px solid #d1d5db;
-        border-radius: 2px;
-        text-align: center;
-        color: #1f1f1f;
-        background-color: #ffffff;
-        height: 18px;
-        font-size: 12px;
-    }
-    QProgressBar::chunk {
-        background-color: #005a9e;
-        border-radius: 1px;
-    }
-    
-    /* === МЕТКИ === */
-    QLabel {
-        color: #1f1f1f;
-        font-size: 13px;
-    }
-    """
+        QMainWindow {
+            background-color: #1E1E1E;
+        }
+        QStatusBar {
+            background-color: #252526;
+            color: #D4D4D4;
+            font-size: 11px;
+        }
+        QProgressBar {
+            border: 1px solid #3E3E42;
+            border-radius: 4px;
+            text-align: center;
+            color: #D4D4D4;
+            background-color: #252526;
+            height: 18px;
+            font-size: 12px;
+        }
+        QProgressBar::chunk {
+            background-color: #0E639C;
+            border-radius: 3px;
+        }
+        QMessageBox {
+            background-color: #1E1E1E;
+            color: #D4D4D4;
+        }
+        QMessageBox QPushButton {
+            min-width: 80px;
+        }
+        """
 
-    def create_index_tab(self):
-        tab = QWidget()
-        layout = QHBoxLayout(tab)
-        layout.setSpacing(4)
-        layout.addWidget(QLabel("Путь к папке:"))
-        self.dir_input = QLineEdit()
-        layout.addWidget(self.dir_input)
-        browse_btn = QPushButton("Обзор")
-        browse_btn.clicked.connect(self.browse_directory)
-        layout.addWidget(browse_btn)
-        index_btn = QPushButton("Индексировать")
-        index_btn.clicked.connect(self.start_indexing)
-        layout.addWidget(index_btn)
-        return tab
+    def _on_date_check_changed(self, state):
+        enabled = state == Qt.CheckState.Checked.value
+        self._date_from.setEnabled(enabled)
+        self._date_from_label.setEnabled(enabled)
+        self._date_to.setEnabled(enabled)
+        self._date_to_label.setEnabled(enabled)
+        self._date_error.hide()
 
-    def create_keywords_tab(self):
-        tab = QWidget()
-        layout = QHBoxLayout(tab)
-        layout.setSpacing(4)
-        layout.addWidget(QLabel("Запрос:"))
-        self.keywords_input = QLineEdit()
-        self.keywords_input.setPlaceholderText("Например: отчёт по проекту")
-        layout.addWidget(self.keywords_input)
-        search_btn = QPushButton("Поиск")
-        search_btn.clicked.connect(self.search_keywords)
-        layout.addWidget(search_btn)
-        return tab
+    def _validate_dates(self) -> bool:
+        if not self._date_check.isChecked():
+            return True
 
-    def create_date_tab(self):
-        tab = QWidget()
-        layout = QHBoxLayout(tab)
-        layout.setSpacing(4)
-        layout.addWidget(QLabel("Начальная дата:"))
-        self.start_date = QDateEdit()
-        self.start_date.setCalendarPopup(True)
-        self.start_date.setDate(QDate.currentDate().addDays(-30))
-        layout.addWidget(self.start_date)
-        layout.addWidget(QLabel("Конечная дата:"))
-        self.end_date = QDateEdit()
-        self.end_date.setCalendarPopup(True)
-        self.end_date.setDate(QDate.currentDate())
-        layout.addWidget(self.end_date)
-        search_btn = QPushButton("Поиск")
-        search_btn.clicked.connect(self.search_date)
-        layout.addWidget(search_btn)
-        return tab
+        d_from = self._date_from.date()
+        d_to = self._date_to.date()
 
-    def create_combined_tab(self):
-        tab = QWidget()
-        vlayout = QVBoxLayout(tab)
-        vlayout.setSpacing(3)
-        hlayout1 = QHBoxLayout()
-        hlayout1.addWidget(QLabel("Запрос:"))
-        self.combined_query = QLineEdit()
-        self.combined_query.setPlaceholderText("Ключевые слова...")
-        hlayout1.addWidget(self.combined_query)
-        vlayout.addLayout(hlayout1)
-        hlayout2 = QHBoxLayout()
-        hlayout2.addWidget(QLabel("Начальная дата:"))
-        self.combined_start_date = QDateEdit()
-        self.combined_start_date.setCalendarPopup(True)
-        self.combined_start_date.setDate(QDate.currentDate().addDays(-30))
-        hlayout2.addWidget(self.combined_start_date)
-        hlayout2.addWidget(QLabel("Конечная дата:"))
-        self.combined_end_date = QDateEdit()
-        self.combined_end_date.setCalendarPopup(True)
-        self.combined_end_date.setDate(QDate.currentDate())
-        hlayout2.addWidget(self.combined_end_date)
-        vlayout.addLayout(hlayout2)
-        search_btn = QPushButton("Поиск")
-        search_btn.clicked.connect(self.search_combined)
-        vlayout.addWidget(search_btn, alignment=Qt.AlignmentFlag.AlignLeft)
-        return tab
+        if d_from > d_to:
+            self._date_from.setStyleSheet("border: 1px solid #DC2626; border-radius: 4px; padding: 4px 8px;")
+            self._date_to.setStyleSheet("border: 1px solid #DC2626; border-radius: 4px; padding: 4px 8px;")
+            self._date_error.show()
+            return False
+        else:
+            self._date_from.setStyleSheet("")
+            self._date_to.setStyleSheet("")
+            self._date_error.hide()
+            return True
 
-    def create_filename_tab(self):
-        tab = QWidget()
-        layout = QHBoxLayout(tab)
-        layout.setSpacing(4)
-        layout.addWidget(QLabel("Имя файла:"))
-        self.filename_input = QLineEdit()
-        self.filename_input.setPlaceholderText("Например: report.docx")
-        layout.addWidget(self.filename_input)
-        search_btn = QPushButton("Поиск")
-        search_btn.clicked.connect(self.search_filename)
-        layout.addWidget(search_btn)
-        return tab
+    def do_search(self):
+        """Основной поиск: текст + опционально даты."""
+        query_text = self._query_input.text().strip()
+        scope = self._scope_group.checkedId()
+        use_date = self._date_check.isChecked()
 
-    def browse_directory(self):
-        directory = QFileDialog.getExistingDirectory(self, "Выберите директорию")
-        if directory:
-            self.dir_input.setText(directory)
+        if not query_text and not use_date:
+            QMessageBox.warning(self, "Внимание", "Введите запрос или включите фильтр по дате.")
+            return
 
-    def start_indexing(self):
+        if use_date and not self._validate_dates():
+            return
+
+        roles = self._get_user_roles()
+        if not roles:
+            QMessageBox.warning(self, "Ошибка", "Не удалось определить роли пользователя.")
+            return
+
+        self._status_bar.showMessage("Поиск...")
+        t0 = time.perf_counter()
+
+        try:
+            with self.ix.searcher() as searcher:
+                if use_date and query_text:
+                    params = {
+                        'query': query_text,
+                        'start_date': self._date_from.date().toString("yyyy-MM-dd"),
+                        'end_date': self._date_to.date().toString("yyyy-MM-dd"),
+                        'limit': 50
+                    }
+                    results = combined_search(searcher, self.parser, params, roles)
+
+                elif use_date and not query_text:
+                    start = self._date_from.date().toString("yyyy-MM-dd")
+                    end = self._date_to.date().toString("yyyy-MM-dd")
+                    results = search_time_range(searcher, start, end, roles, limit=50)
+
+                elif scope == 1:
+                    results = search_by_filename(searcher, query_text, roles, limit=50)
+
+                else:
+                    results = search_index(searcher, self.parser, query_text, roles, limit=50)
+
+            elapsed = time.perf_counter() - t0
+            self._status_bar.showMessage(f"Найдено: {len(results)} документов | Время: {elapsed:.2f} с")
+            self._display_results(results, by_date=False)
+
+        except Exception as e:
+            logger.error(f"Ошибка поиска: {e}")
+            QMessageBox.critical(self, "Ошибка поиска", str(e))
+            self._status_bar.showMessage("Ошибка поиска")
+
+    def do_search_by_period(self):
+        """Поиск только по периоду, игнорирует текст."""
+        if not self._date_check.isChecked():
+            QMessageBox.warning(self, "Внимание", "Включите фильтр по дате.")
+            return
+
+        if not self._validate_dates():
+            return
+
+        roles = self._get_user_roles()
+        if not roles:
+            QMessageBox.warning(self, "Ошибка", "Не удалось определить роли пользователя.")
+            return
+
+        self._status_bar.showMessage("Поиск за период...")
+        t0 = time.perf_counter()
+
+        try:
+            start = self._date_from.date().toString("yyyy-MM-dd")
+            end = self._date_to.date().toString("yyyy-MM-dd")
+
+            with self.ix.searcher() as searcher:
+                results = search_time_range(searcher, start, end, roles, limit=50)
+
+            elapsed = time.perf_counter() - t0
+            self._status_bar.showMessage(f"Найдено: {len(results)} документов | Время: {elapsed:.2f} с")
+            self._display_results(results, by_date=True)
+
+        except Exception as e:
+            logger.error(f"Ошибка поиска по дате: {e}")
+            QMessageBox.critical(self, "Ошибка поиска", str(e))
+            self._status_bar.showMessage("Ошибка поиска")
+
+    def _display_results(self, results, by_date=False):
+        table = self._results_stack.widget(1)
+
+        if not results:
+            self._results_stack.setCurrentIndex(0)
+            QMessageBox.information(self, "Поиск", "Ничего не найдено.")
+            return
+
+        self._results_stack.setCurrentIndex(1)
+        table.setRowCount(0)
+
+        scores = [float(r.get('score', 0.0)) for r in results]
+        max_score = max(scores) if scores else 1.0
+        if max_score == 0:
+            max_score = 1.0
+
+        for i, res in enumerate(results):
+            table.insertRow(i)
+
+            path = str(res.get('path', ''))
+            filename = Path(path).name
+            score = float(res.get('score', 0.0))
+            date_str = str(res.get('last_modified', ''))
+
+            name_item = QTableWidgetItem(filename)
+            name_item.setData(Qt.ItemDataRole.UserRole, path)
+            table.setItem(i, 0, name_item)
+
+            path_display = path
+            if len(path) > 60:
+                path_display = "..." + path[-57:]
+
+            path_item = QTableWidgetItem(path_display)
+            path_item.setToolTip(path)
+            path_item.setFlags(path_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            table.setItem(i, 1, path_item)
+
+            table.setItem(i, 2, QTableWidgetItem(date_str))
+
+            if by_date:
+                rel_item = QTableWidgetItem("—")
+            else:
+                percentage = min(100.0, (score / max_score) * 100.0)
+                rel_text = f"{percentage:.0f}%"
+                rel_item = QTableWidgetItem(rel_text)
+
+                if percentage >= 80:
+                    rel_item.setForeground(Qt.GlobalColor.darkGreen)
+                elif percentage >= 50:
+                    rel_item.setForeground(Qt.GlobalColor.darkYellow)
+                else:
+                    rel_item.setForeground(Qt.GlobalColor.gray)
+
+            table.setItem(i, 3, rel_item)
+
+            btn = QPushButton("👁")
+            btn.setFixedSize(28, 28)
+            btn.setStyleSheet("""
+                QPushButton {
+                    border: none;
+                    background: transparent;
+                    color: #005A9E;
+                    font-size: 14px;
+                }
+                QPushButton:hover {
+                    color: #004578;
+                }
+            """)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            terms = res.get('matched_terms', [])
+            btn.clicked.connect(lambda checked=False, p=path, t=terms: PreviewDialog(p, t, self).exec())
+            table.setCellWidget(i, 4, btn)
+
+    def _show_index_dialog(self):
+        """Диалог индексирования для администратора."""
         user = auth_manager.get_current_user()
         if not user or "admin" not in user.roles:
             QMessageBox.critical(self, "Отказ в доступе", "Индексирование доступно только администраторам.")
             return
-        directory = self.dir_input.text()
+
+        directory = QFileDialog.getExistingDirectory(self, "Выберите директорию для индексирования")
         if not directory:
-            QMessageBox.warning(self, "Внимание", "Укажите путь к директории!")
-            return
-        dir_path = Path(directory)
-        if not dir_path.exists() or not dir_path.is_dir():
-            QMessageBox.warning(self, "Ошибка", "Указанный путь не существует или не является директорией!")
             return
 
-        self.progress_bar.setValue(0)
-        self.progress_bar.show()
-        self.tabs.setEnabled(False)
+        dir_path = Path(directory)
+        if not dir_path.exists() or not dir_path.is_dir():
+            QMessageBox.warning(self, "Ошибка", "Указанный путь не существует.")
+            return
+
+        self._progress_bar.setValue(0)
+        self._progress_bar.show()
+        self._search_btn.setEnabled(False)
 
         roles = self._get_user_roles()
         self.index_thread = IndexThread(dir_path, roles)
-        self.index_thread.progress.connect(self.progress_bar.setValue)
-        self.index_thread.finished.connect(self.on_indexing_finished)
+        self.index_thread.progress.connect(self._progress_bar.setValue)
+        self.index_thread.finished.connect(self._on_indexing_finished)
         self.index_thread.start()
 
-    def on_indexing_finished(self, success, failed, message):
-        self.progress_bar.hide()
-        self.tabs.setEnabled(True)
+    def _on_indexing_finished(self, success, failed, message):
+        self._progress_bar.hide()
+        self._search_btn.setEnabled(True)
 
-        # Показываем диалог
-        QMessageBox.information(self, "Индексация", f"{message}\nПроиндексировано: {success}\nОшибок чтения: {failed}")
+        QMessageBox.information(self, "Индексирование", f"{message}\nПроиндексировано: {success}\nОшибок чтения: {failed}")
 
-        # Отложенное обновление индекса (предотвращает краш 0xC0000409)
         from PyQt6.QtCore import QTimer
         QTimer.singleShot(200, self._reload_index_safely)
 
@@ -301,109 +679,27 @@ class FileSearchApp(QMainWindow):
         try:
             self.ix = FileIndexer.get_index(Config.INDEX_DIR)
             self.parser = setup_search_parser(self.ix.schema)
+            self._status_bar.showMessage("Индекс обновлён")
         except Exception as e:
             logger.error(f"Ошибка перезагрузки индекса: {e}")
-
-    def _get_user_roles(self):
-        user = auth_manager.get_current_user()
-        return user.roles if user and user.roles else []
-
-    def display_results(self, results):
-        start_time = time.time()
-        self.results_table.setRowCount(0)
-        if not results:
-            self.results_table.hide()
-            QMessageBox.information(self, "Поиск", "Ничего не найдено или нет прав доступа.")
-            time.sleep(0.3)
-            return
-        try:
-            for i, res in enumerate(results):
-                self.results_table.insertRow(i)
-                path = str(res.get('path', ''))
-                score = float(res.get('score', 0.0))
-                date = str(res.get('last_modified', ''))
-                self.results_table.setItem(i, 0, QTableWidgetItem(path))
-                self.results_table.setItem(i, 1, QTableWidgetItem(f"{score:.2f}"))
-                self.results_table.setItem(i, 2, QTableWidgetItem(date))
-                btn = QPushButton("Просмотр")
-                btn.setFixedWidth(80)
-                btn.setStyleSheet("QPushButton { background-color: #7289da; color: white; border-radius: 3px; }")
-                terms = res.get('matched_terms', [])
-                btn.clicked.connect(lambda checked=False, p=path, t=terms: PreviewDialog(p, t, self).exec())
-                self.results_table.setCellWidget(i, 3, btn)
-            self.results_table.show()
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка отображения", f"Не удалось показать результаты:\n{e}")
-            self.results_table.hide()
-
-    def search_keywords(self):
-        self.last_query = self.keywords_input.text()
-        if not self.last_query.strip():
-            QMessageBox.warning(self, "Внимание", "Введите поисковый запрос!")
-            return
-        try:
-            roles = self._get_user_roles()
-            with self.ix.searcher() as searcher:
-                res = search_index(searcher, self.parser, self.last_query, user_roles=roles)
-            self.display_results(res)
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка поиска", str(e))
-
-    def search_date(self):
-        try:
-            user_roles = self._get_user_roles()
-            start = self.start_date.date().toString("yyyy-MM-dd")
-            end = self.end_date.date().toString("yyyy-MM-dd")
-            with self.ix.searcher() as searcher:
-                res = search_time_range(searcher, start, end, user_roles)
-            self.display_results(res)
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка поиска", str(e))
-
-    def search_combined(self):
-        self.last_query = self.combined_query.text()
-        if not self.last_query:
-            QMessageBox.warning(self, "Внимание", "Введите запрос!")
-            return
-        try:
-            user_roles = self._get_user_roles()
-            params = {
-                'query': self.last_query,
-                'start_date': self.combined_start_date.date().toString("yyyy-MM-dd"),
-                'end_date': self.combined_end_date.date().toString("yyyy-MM-dd"),
-                'limit': 10
-            }
-            with self.ix.searcher() as searcher:
-                res = combined_search(searcher, self.parser, params, user_roles)
-            self.display_results(res)
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка поиска", str(e))
-
-    def search_filename(self):
-        self.last_query = self.filename_input.text()
-        if not self.last_query:
-            QMessageBox.warning(self, "Внимание", "Введите имя файла!")
-            return
-        try:
-            user_roles = self._get_user_roles()
-            with self.ix.searcher() as searcher:
-                res = search_by_filename(searcher, self.last_query, user_roles)
-            self.display_results(res)
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка поиска", str(e))
+            self._status_bar.showMessage("Ошибка обновления индекса")
 
     def open_file_from_result(self, row, column):
-        path_item = self.results_table.item(row, 0)
-        if not path_item:
+        table = self._results_stack.widget(1)
+        name_item = table.item(row, 0)
+        if not name_item:
             return
-        path = path_item.text()
-        if not os.path.exists(path):
+
+        path = name_item.data(Qt.ItemDataRole.UserRole)
+        if not path or not os.path.exists(path):
             QMessageBox.warning(self, "Ошибка", "Файл не найден!")
             return
+
         current_user = auth_manager.get_current_user()
         if not current_user or not check_file_access(path, current_user.roles):
             QMessageBox.warning(self, "Отказ в доступе", "У вас нет прав для открытия этого файла.")
             return
+
         try:
             if sys.platform == "win32":
                 os.startfile(path)
@@ -415,3 +711,19 @@ class FileSearchApp(QMainWindow):
                 subprocess.run(["xdg-open", path])
         except Exception as e:
             QMessageBox.warning(self, "Ошибка", f"Не удалось открыть файл:\n{e}")
+
+    def _show_users_dialog(self):
+        from ui.dialogs.user_management import UserManagementDialog
+        UserManagementDialog(self).exec()
+
+    def _show_acl_dialog(self):
+        from ui.dialogs.acl_management import ACLManagementDialog
+        ACLManagementDialog(self).exec()
+
+    def _do_logout(self):
+        if hasattr(self, "logout_callback"):
+            self.logout_callback()
+
+    def _get_user_roles(self):
+        user = auth_manager.get_current_user()
+        return user.roles if user and user.roles else []

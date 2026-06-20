@@ -2,6 +2,10 @@ secure_search.db
 session.token
 indexdir/
 nltk_data/
+benchmark_search.py
+generate_test_data.py
+modify_files.py
+.token_key
 
 __pycache__/
 *.py[cod]
@@ -29,6 +33,10 @@ wheels/
 *.spec
 *.bak
 *.txt
+*.bak
+*.spec
+*.db-wal
+*.db-shm
 
 .vscode/
 .idea/
@@ -36,5 +44,6 @@ wheels/
 *.swo
 *~
 .DS_Store
+.pytest_cache
 
 *.log

@@ -1,29 +1,29 @@
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
-    QPushButton, QInputDialog, QMessageBox
+    QPushButton, QInputDialog, QMessageBox, QHeaderView
 )
 from models.database import SessionLocal, DocumentACL
-import core.access_control
 from core.access_control import invalidate_acl_cache
+from sqlalchemy.exc import IntegrityError
 
 class ACLManagementDialog(QDialog):
-    """Диалог управления правилами доступа к файлам/папкам."""
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Управление доступом (ACL)")
-        self.setMinimumSize(650, 400)
-        self.setStyleSheet("""
-            QDialog { background-color: #18191c; color: #e0e0e0; }
-            QPushButton { background-color: #7289da; padding: 6px 12px; border-radius: 4px; }
-            QPushButton:hover { background-color: #5f73bc; }
-            QPushButton.danger { background-color: #f04747; }
-            QTableWidget { background-color: #23272a; color: #e0e0e0; gridline-color: #333; }
-        """)
+        self.setWindowTitle("Управление доступом")
+        self.setMinimumSize(700, 450)
+
         layout = QVBoxLayout(self)
+
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(["ID", "Маска пути", "Доступно ролям", "Рекурсивно"])
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         layout.addWidget(self.table)
+        self.table.setColumnWidth(0, 50)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(3, 80)
+
         btns = QHBoxLayout()
         self.btn_add = QPushButton("Добавить правило")
         self.btn_delete = QPushButton("Удалить выбранное")
@@ -31,6 +31,7 @@ class ACLManagementDialog(QDialog):
         btns.addWidget(self.btn_add)
         btns.addWidget(self.btn_delete)
         layout.addLayout(btns)
+
         self.btn_add.clicked.connect(self.add_rule)
         self.btn_delete.clicked.connect(self.delete_rule)
         self.load_rules()
@@ -39,14 +40,21 @@ class ACLManagementDialog(QDialog):
         db = SessionLocal()
         try:
             rules = db.query(DocumentACL).all()
+            self.table.clearContents()
             self.table.setRowCount(len(rules))
+
             for i, r in enumerate(rules):
                 self.table.setItem(i, 0, QTableWidgetItem(str(r.id)))
                 self.table.setItem(i, 1, QTableWidgetItem(r.path_mask))
                 self.table.setItem(i, 2, QTableWidgetItem(r.allowed_roles))
-                self.table.setItem(i, 3, QTableWidgetItem("Да" if getattr(r, 'is_recursive', False) else "Нет"))
+                self.table.setItem(
+                    i, 3,
+                    QTableWidgetItem("Да" if getattr(r, 'is_recursive', False) else "Нет")
+                )
         finally:
             db.close()
+
+        self.table.viewport().update()
 
     def add_rule(self):
         path, ok1 = QInputDialog.getText(self, "Новое правило", "Маска пути (напр. D:\\Docs\\* или *.pdf):")
@@ -55,11 +63,9 @@ class ACLManagementDialog(QDialog):
         roles, ok2 = QInputDialog.getText(self, "Новое правило", "Роли через запятую (admin,user):")
         if not ok2 or not roles.strip():
             return
-        recursive = QMessageBox.question(self, "Рекурсия?", "Применять к вложенным файлам и папкам?") == QMessageBox.StandardButton.Yes
 
-        from models.database import SessionLocal, DocumentACL
-        from sqlalchemy.exc import IntegrityError
-        import core.access_control
+        recursive = QMessageBox.question(self, "Рекурсия?",
+                                         "Применять к вложенным файлам и папкам?") == QMessageBox.StandardButton.Yes
 
         db = SessionLocal()
         try:
@@ -71,7 +77,6 @@ class ACLManagementDialog(QDialog):
             db.commit()
             invalidate_acl_cache()
             self.load_rules()
-            core.access_control._cached_acl = None
         except IntegrityError:
             db.rollback()
             QMessageBox.warning(self, "Ошибка", "Такое правило уже существует.")
@@ -95,6 +100,5 @@ class ACLManagementDialog(QDialog):
             db.commit()
             invalidate_acl_cache()
             self.load_rules()
-            core.access_control._cached_acl = None
         finally:
             db.close()
