@@ -3,9 +3,7 @@ whoosh>=2.7.4
 pdfplumber>=0.5.28
 python-docx>=0.8.11
 nltk>=3.7
-#natasha>=1.6.0
 pymorphy3>=1.0.0
-#git+https://github.com/ahmados/rusynonyms.git
 git+https://github.com/ahmados/rusynonyms.git#egg=ru_synonyms
 tqdm>=4.64.0
 sqlalchemy>=2.0.0
